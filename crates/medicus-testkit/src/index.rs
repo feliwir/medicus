@@ -63,11 +63,7 @@ pub fn record(
             store: "local".into(),
             key: BlobKey::generate(medicus_core::blob::BlobKind::Instance),
         },
-        metadata: Some(BlobRef {
-            store: "local".into(),
-            key: BlobKey::generate(medicus_core::blob::BlobKind::InstanceMetadata),
-        }),
-        metadata_size: 100,
+        header_length: 400,
     }
 }
 
@@ -234,7 +230,7 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
     assert!(study_uids(index, &by_mod("M?")).await.contains("1.1"));
 
     let bytes = index.stored_bytes().await.unwrap();
-    assert_eq!(bytes.get("local"), Some(&3300));
+    assert_eq!(bytes.get("local"), Some(&3000));
 }
 
 async fn duplicates(index: &dyn IndexStore) {

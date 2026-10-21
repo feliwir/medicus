@@ -107,7 +107,7 @@ struct ExistingInstance {
 }
 
 const LOCATION_COLUMNS: &str = "i.id, st.study_uid, se.series_uid, i.sop_uid, i.sop_class, i.transfer_syntax, \
-     i.size, i.blob_store, i.blob_key, i.meta_store, i.meta_key, i.meta_size";
+     i.size, i.blob_store, i.blob_key, i.header_length";
 const LOCATION_KINDS: &[CellKind] = &[
     CellKind::Int,
     CellKind::Text,
@@ -116,8 +116,6 @@ const LOCATION_KINDS: &[CellKind] = &[
     CellKind::Text,
     CellKind::Text,
     CellKind::Int,
-    CellKind::Text,
-    CellKind::Text,
     CellKind::Text,
     CellKind::Text,
     CellKind::Int,
@@ -156,8 +154,7 @@ fn decode_location(row: &[Cell]) -> Result<ExistingInstance> {
             transfer_syntax: uid(5)?.into(),
             size: size(6),
             blob: blob(7, 8)?.ok_or_else(|| corrupt("blob reference"))?,
-            metadata: blob(9, 10)?,
-            metadata_size: size(11),
+            header_length: size(9),
         },
     })
 }
@@ -207,8 +204,7 @@ async fn remove_instance<T: Tx>(tx: &mut T, existing: &ExistingInstance, now: i6
         row[1].int().ok_or_else(|| corrupt("id"))?,
         row[2].int().ok_or_else(|| corrupt("id"))?,
     );
-    let size =
-        i64::try_from(existing.location.size + existing.location.metadata_size).unwrap_or(i64::MAX);
+    let size = to_i64(existing.location.size);
 
     let mut s = Stmt::new(d);
     s.push("DELETE FROM instances WHERE id = ")
@@ -412,7 +408,6 @@ async fn insert_instance<T: Tx>(
 ) -> Result<()> {
     let mut cols = level_values(record, QueryLevel::Instance);
     cols.retain(|(n, _)| n != "sop_uid" && n != "sop_class");
-    let metadata = record.metadata.as_ref();
     let mut fixed: Vec<(&str, Cell)> = vec![
         ("series_fk", series_fk.into()),
         ("sop_uid", record.instance.as_str().into()),
@@ -421,12 +416,7 @@ async fn insert_instance<T: Tx>(
         ("size", to_i64(record.size).into()),
         ("blob_store", record.blob.store.as_str().into()),
         ("blob_key", record.blob.key.as_str().into()),
-        ("meta_store", metadata.map(|m| m.store.clone()).into()),
-        (
-            "meta_key",
-            metadata.map(|m| m.key.as_str().to_owned()).into(),
-        ),
-        ("meta_size", to_i64(record.metadata_size).into()),
+        ("header_length", to_i64(record.header_length).into()),
         ("received_at", now.into()),
     ];
     fixed.extend(cols.iter().map(|(n, v)| (n.as_str(), v.clone())));
@@ -449,7 +439,7 @@ async fn update_aggregates<T: Tx>(
     series_fk: i64,
 ) -> Result<()> {
     let d = tx.dialect();
-    let total = to_i64(record.size).saturating_add(to_i64(record.metadata_size));
+    let total = to_i64(record.size);
     let mut s = Stmt::new(d);
     s.push("UPDATE series SET num_instances = num_instances + 1, size_bytes = size_bytes + ")
         .bind(total)

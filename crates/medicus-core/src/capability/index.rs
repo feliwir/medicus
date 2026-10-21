@@ -48,21 +48,19 @@ pub struct InstanceRecord {
     pub instance: SopInstanceUid,
     pub sop_class: SopClassUid,
     pub transfer_syntax: TransferSyntaxUid,
-    /// The standard attributes of all levels (`tags::STANDARD`) as DICOM JSON; the index splits
-    /// them by level.
+    /// The attributes to index, as DICOM JSON: the standard attributes of all levels
+    /// (`tags::STANDARD`) plus any configured extra tags. The index splits them by level.
     pub attributes: DicomJsonObject,
     /// Size of the stored DICOM file in bytes.
     pub size: u64,
     pub blob: BlobRef,
-    /// The instance's full metadata (DICOM JSON, bulk data stripped), if stored separately.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<BlobRef>,
-    /// Size of the metadata blob in bytes (0 if none).
-    #[serde(default)]
-    pub metadata_size: u64,
+    /// Length in bytes of the file's header: the File Meta Information and all data elements
+    /// before the first bulk data element (Pixel Data). A range read of `0..header_length` yields
+    /// the instance's complete metadata in its original binary encoding.
+    pub header_length: u64,
 }
 
-/// Where a stored instance and its metadata are.
+/// Where a stored instance is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceLocation {
     pub study: StudyInstanceUid,
@@ -72,10 +70,10 @@ pub struct InstanceLocation {
     pub transfer_syntax: TransferSyntaxUid,
     pub size: u64,
     pub blob: BlobRef,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<BlobRef>,
-    #[serde(default)]
-    pub metadata_size: u64,
+    /// Length in bytes of the file's header: the File Meta Information and all data elements
+    /// before the first bulk data element (Pixel Data). A range read of `0..header_length` yields
+    /// the instance's complete metadata in its original binary encoding.
+    pub header_length: u64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -162,7 +160,7 @@ pub trait IndexStore: Send + Sync + 'static {
     /// Deletes events with `seq <= up_to`; returns how many were deleted.
     async fn prune_events(&self, up_to: u64) -> Result<u64>;
 
-    /// Bytes referenced per blob store (instances and metadata), for quota accounting.
+    /// Bytes referenced per blob store, for quota accounting.
     async fn stored_bytes(&self) -> Result<BTreeMap<String, u64>>;
 }
 

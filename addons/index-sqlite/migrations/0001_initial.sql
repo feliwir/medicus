@@ -86,9 +86,7 @@ CREATE TABLE instances (
     size             INTEGER NOT NULL,
     blob_store       TEXT NOT NULL,
     blob_key         TEXT NOT NULL,
-    meta_store       TEXT,
-    meta_key         TEXT,
-    meta_size        INTEGER NOT NULL DEFAULT 0,
+    header_length    INTEGER NOT NULL,
     received_at      INTEGER NOT NULL
 );
 CREATE INDEX instances_series ON instances (series_fk);

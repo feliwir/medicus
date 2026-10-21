@@ -33,9 +33,7 @@ pub struct BlobKey(String);
 pub enum BlobKind {
     /// A DICOM Part 10 file.
     Instance,
-    /// DICOM JSON metadata of one instance.
-    InstanceMetadata,
-    /// Consolidated DICOM JSON metadata of a series.
+    /// Derived cache: the concatenated binary headers of a series' instances.
     SeriesMetadata,
 }
 
@@ -43,8 +41,7 @@ impl BlobKind {
     fn suffix(self) -> &'static str {
         match self {
             Self::Instance => "dcm",
-            Self::InstanceMetadata => "json",
-            Self::SeriesMetadata => "series.json",
+            Self::SeriesMetadata => "series"
         }
     }
 }

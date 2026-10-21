@@ -182,10 +182,7 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         let mut tx = self.backend.begin_read().await?;
         let s = Stmt::raw(
             self.backend.dialect(),
-            "SELECT blob_store, CAST(SUM(size) AS BIGINT) FROM instances GROUP BY blob_store \
-             UNION ALL \
-             SELECT meta_store, CAST(SUM(meta_size) AS BIGINT) FROM instances \
-             WHERE meta_store IS NOT NULL GROUP BY meta_store",
+            "SELECT blob_store, CAST(SUM(size) AS BIGINT) FROM instances GROUP BY blob_store",
         );
         let mut out = BTreeMap::new();
         for row in tx.fetch(&s, &[CellKind::Text, CellKind::Int]).await? {
