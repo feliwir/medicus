@@ -41,6 +41,23 @@ jobs:
       - run: cargo nextest run --workspace --all-features
       - run: cargo test --workspace --doc
 
+  # The C example addon under AddressSanitizer: memory errors in the C ABI path fail CI.
+  c-addon-asan:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Build tests with an ASan-instrumented C addon
+        run: MEDICUS_C_SANITIZE=address cargo test -p medicus-host --test abi --no-run
+      - name: Run the C addon test with the ASan runtime preloaded
+        run: |
+          bin=$(cargo test -p medicus-host --test abi --no-run --message-format=json \
+            | jq -r 'select(.executable != null and .target.name == "abi") | .executable')
+          LD_PRELOAD=$(cc -print-file-name=libasan.so) ASAN_OPTIONS=detect_leaks=1 "$bin" c_addon
+        env:
+          MEDICUS_C_SANITIZE: address
+
   msrv:
     runs-on: ubuntu-latest
     steps:
