@@ -1,0 +1,19 @@
+[package]
+name = "index-sql-common"
+description = "Database-neutral SQL implementation of the medicus IndexStore (schema mapping, query compilation, write logic)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+medicus-core.workspace = true
+
+async-trait.workspace = true
+serde_json.workspace = true
+time.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

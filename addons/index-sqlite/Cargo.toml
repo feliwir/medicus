@@ -1,0 +1,25 @@
+[package]
+name = "index-sqlite"
+description = "medicus IndexStore on SQLite (bundled, no system library needed)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+index-sql-common = { path = "../index-sql-common" }
+medicus-addon-sdk.workspace = true
+medicus-core.workspace = true
+
+async-trait.workspace = true
+serde.workspace = true
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite", "migrate", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+medicus-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true

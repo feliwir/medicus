@@ -1,0 +1,19 @@
+[package]
+name = "index-sqlite-dylib"
+description = "index-sqlite as a dynamically loadable addon library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "medicus_index_sqlite"
+crate-type = ["cdylib"]
+
+[dependencies]
+index-sqlite = { path = "../index-sqlite" }
+medicus-addon-sdk.workspace = true
+
+[lints]
+workspace = true
