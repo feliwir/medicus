@@ -1,0 +1,23 @@
+[package]
+name = "test-addon"
+description = "Addon used by the ABI tests: in-memory BlobStore and an EventHook, with failure injection."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+medicus-core.workspace = true
+
+bytes.workspace = true
+futures.workspace = true
+serde.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

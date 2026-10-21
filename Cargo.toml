@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/*"]
+members = ["crates/*", "addons/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -13,6 +13,7 @@ authors = ["Stephan Vedder"]
 medicus-core = { path = "crates/medicus-core" }
 medicus-abi = { path = "crates/medicus-abi" }
 medicus-addon-sdk = { path = "crates/medicus-addon-sdk" }
+medicus-host = { path = "crates/medicus-host" }
 
 anyhow = "1"
 async-trait = "0.1"
