@@ -1,6 +1,8 @@
 -- medicus index schema, version 1.
 -- Column names follow addons/index-sql-common/src/schema.rs. Times are microseconds since the
 -- Unix epoch (UTC). DA columns hold YYYYMMDD; *_time_key columns hold sortable HHMMSSffffff.
+-- `extra` columns hold the values of configured extra tags (see extra_tags) in SQLite's binary
+-- JSONB format (BLOB, SQLite >= 3.45): parsed once on write instead of on every query.
 
 CREATE TABLE patients (
     id                  INTEGER PRIMARY KEY,
@@ -10,6 +12,7 @@ CREATE TABLE patients (
     patient_name_folded TEXT,
     birth_date          TEXT,
     sex                 TEXT,
+    extra               BLOB,
     UNIQUE (patient_id, issuer)
 );
 CREATE INDEX patients_name ON patients (patient_name_folded);
@@ -32,7 +35,8 @@ CREATE TABLE studies (
     size_bytes       INTEGER NOT NULL DEFAULT 0,
     received_at      INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
-    last_accessed_at INTEGER
+    last_accessed_at INTEGER,
+    extra            BLOB
 );
 CREATE INDEX studies_patient ON studies (patient_fk);
 CREATE INDEX studies_date ON studies (study_date);
@@ -67,7 +71,8 @@ CREATE TABLE series (
     pps_start_date  TEXT,
     num_instances   INTEGER NOT NULL DEFAULT 0,
     size_bytes      INTEGER NOT NULL DEFAULT 0,
-    updated_at      INTEGER NOT NULL
+    updated_at      INTEGER NOT NULL,
+    extra           BLOB
 );
 CREATE INDEX series_study ON series (study_fk);
 CREATE INDEX series_modality ON series (modality);
@@ -87,9 +92,19 @@ CREATE TABLE instances (
     blob_store       TEXT NOT NULL,
     blob_key         TEXT NOT NULL,
     header_length    INTEGER NOT NULL,
-    received_at      INTEGER NOT NULL
+    received_at      INTEGER NOT NULL,
+    extra            BLOB
 );
 CREATE INDEX instances_series ON instances (series_fk);
+
+-- Operator-configured extra indexed tags. Values live in the `extra` JSON column of the level's
+-- table as {"GGGGEEEE": [match-form values]}; state is 'ready' or 'backfilling'.
+CREATE TABLE extra_tags (
+    tag   TEXT PRIMARY KEY,
+    vr    TEXT NOT NULL,
+    level TEXT NOT NULL,
+    state TEXT NOT NULL
+);
 
 -- The transactional outbox (PLAN 3.7). AUTOINCREMENT: sequence numbers are never reused.
 CREATE TABLE events (

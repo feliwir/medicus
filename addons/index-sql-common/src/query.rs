@@ -4,18 +4,20 @@
 //! normalization, same sortable date/time forms, same PN case folding), so an index answer equals
 //! what the in-memory matcher would return. The shared conformance suite checks this.
 
-use medicus_core::capability::index::DicomJsonObject;
+use medicus_core::capability::index::{DicomJsonObject, ExtraTagState, ExtraTagStatus};
 use medicus_core::query::values::{fold, normalize, sortable_lower, sortable_upper};
 use medicus_core::query::{Key, MatchOptions, Matcher, OrderKey, Query};
 use medicus_core::{Error, QueryLevel, Result, Tag, Vr};
 use serde_json::{Value, json};
 
+use crate::extra;
 use crate::schema::{COLUMNS, Column, Storage, column, from_clause, id_expr};
 use crate::sql::{Cell, CellKind, Dialect, Stmt};
 
 pub(crate) struct Compiled {
     pub stmt: Stmt,
     pub select: Vec<&'static Column>,
+    // The levels' `extra` JSON (if any) is selected after `select`, see `row_to_json`.
     pub kinds: Vec<CellKind>,
     pub unfiltered: Vec<Tag>,
     pub limit: Option<u32>,
@@ -57,18 +59,19 @@ fn kind(c: &Column) -> CellKind {
     }
 }
 
-pub(crate) fn compile(dialect: Dialect, q: &Query) -> Result<Compiled> {
+pub(crate) fn compile(dialect: Dialect, q: &Query, extras: &[ExtraTagStatus]) -> Result<Compiled> {
     let select = selected(q.level);
-    let kinds = select.iter().map(|c| kind(c)).collect();
+    let extra_levels: Vec<QueryLevel> = QueryLevel::ALL
+        .into_iter()
+        .filter(|l| *l <= q.level && extras.iter().any(|e| e.tag.level == *l))
+        .collect();
+    let mut kinds: Vec<CellKind> = select.iter().map(|c| kind(c)).collect();
+    kinds.extend(extra_levels.iter().map(|_| CellKind::Text));
     let mut stmt = Stmt::new(dialect);
     stmt.push("SELECT ");
-    stmt.push(
-        &select
-            .iter()
-            .map(|c| select_expr(c, dialect))
-            .collect::<Vec<_>>()
-            .join(", "),
-    );
+    let mut exprs: Vec<String> = select.iter().map(|c| select_expr(c, dialect)).collect();
+    exprs.extend(extra_levels.iter().map(|l| extra::select_expr(*l, dialect)));
+    stmt.push(&exprs.join(", "));
     stmt.push(from_clause(q.level));
     stmt.push(" WHERE 1=1");
 
@@ -86,7 +89,24 @@ pub(crate) fn compile(dialect: Dialect, q: &Query) -> Result<Compiled> {
                 condition(&mut stmt, c, key, &q.options);
                 stmt.push(")");
             }
-            _ => unfiltered.push(key.tag),
+            Some(_) => unfiltered.push(key.tag),
+            None => match extra::find(extras, key.tag) {
+                Some(e) if e.tag.level > q.level => {
+                    return Err(Error::invalid_argument(format!(
+                        "attribute {} belongs to a level below the query level {}",
+                        key.tag, q.level
+                    )));
+                }
+                Some(e)
+                    if e.state == ExtraTagState::Ready
+                        && extra::compilable(e.tag, &key.matcher, &q.options) =>
+                {
+                    stmt.push(" AND (");
+                    extra::condition(&mut stmt, e.tag, &key.matcher, &q.options);
+                    stmt.push(")");
+                }
+                _ => unfiltered.push(key.tag),
+            },
         }
     }
 
@@ -212,6 +232,13 @@ fn wildcard(stmt: &mut Stmt, c: &Column, expr: &str, pattern: &str, opts: &Match
     if matches!(c.storage, Storage::PersonName { .. }) && opts.pn_case_insensitive {
         p = fold(&p);
     }
+    wildcard_on(stmt, expr, &p);
+}
+
+/// `expr` matches the DICOM wildcard `pattern` (`*`, `?`), case-sensitively. `pattern` must
+/// already be normalized (and folded, for case-insensitive PN matching).
+pub(crate) fn wildcard_on(stmt: &mut Stmt, expr: &str, pattern: &str) {
+    let p = pattern;
     match stmt.dialect() {
         // GLOB: `*` and `?` as in DICOM, case-sensitive; only `[` needs escaping.
         Dialect::Sqlite => {
@@ -332,11 +359,26 @@ fn multi_condition(stmt: &mut Stmt, c: &Column, table: &str, m: &Matcher, opts: 
     }
 }
 
-/// Converts a fetched row into DICOM JSON.
-pub(crate) fn row_to_json(select: &[&Column], row: Vec<Cell>) -> DicomJsonObject {
+/// Converts a fetched row into DICOM JSON, including the extra tags of the selected levels.
+pub(crate) fn row_to_json(
+    compiled: &Compiled,
+    mut row: Vec<Cell>,
+    extras: &[ExtraTagStatus],
+) -> DicomJsonObject {
+    let extra_cells = row.split_off(compiled.select.len().min(row.len()));
     let mut obj = DicomJsonObject::new();
-    for (c, cell) in select.iter().zip(row) {
+    for cell in &extra_cells {
+        if let Some(json) = cell.text() {
+            extra::merge_into(&mut obj, json, extras);
+        }
+    }
+    for (c, cell) in compiled.select.iter().zip(row) {
         let vr = c.vr.as_str();
+        // JSON cells are only ever bound, never fetched; treat them as text for completeness.
+        let cell = match cell {
+            Cell::Json(s) => Cell::Text(s),
+            other => other,
+        };
         let element = match cell {
             Cell::Null => json!({ "vr": vr }),
             Cell::Text(s) if s.is_empty() => json!({ "vr": vr }),
@@ -357,6 +399,7 @@ pub(crate) fn row_to_json(select: &[&Column], row: Vec<Cell>) -> DicomJsonObject
                 _ => json!({ "vr": vr, "Value": [s] }),
             },
             Cell::Int(i) => json!({ "vr": vr, "Value": [i] }),
+            Cell::Json(_) => unreachable!("converted above"),
         };
         obj.insert(String::from(c.tag), element);
     }
@@ -379,7 +422,7 @@ mod tests {
             .with_key(key(tags::STUDY_DATE, Vr::DA, "20240101-20240131"))
             .with_key(key(tags::MODALITIES_IN_STUDY, Vr::CS, "CT\\MR"))
             .with_key(key(tags::ACCESSION_NUMBER, Vr::SH, ""));
-        let c = compile(Dialect::Postgres, &q).unwrap();
+        let c = compile(Dialect::Postgres, &q, &[]).unwrap();
         let sql = &c.stmt.sql;
         assert!(
             sql.contains("p.patient_name_folded LIKE $1 ESCAPE"),
@@ -397,11 +440,11 @@ mod tests {
     #[test]
     fn lower_level_keys_are_rejected_and_unknown_keys_reported() {
         let q = Query::new(QueryLevel::Study).with_key(key(tags::MODALITY, Vr::CS, "CT"));
-        assert!(compile(Dialect::Sqlite, &q).is_err());
+        assert!(compile(Dialect::Sqlite, &q, &[]).is_err());
         let other = Tag::new(0x0018, 0x0050);
         let q = Query::new(QueryLevel::Instance).with_key(key(other, Vr::DS, "1.5"));
         assert_eq!(
-            compile(Dialect::Sqlite, &q).unwrap().unfiltered,
+            compile(Dialect::Sqlite, &q, &[]).unwrap().unfiltered,
             vec![other]
         );
     }
@@ -410,7 +453,7 @@ mod tests {
     fn glob_escaping() {
         let q =
             Query::new(QueryLevel::Study).with_key(key(tags::STUDY_DESCRIPTION, Vr::LO, "[a]*"));
-        let c = compile(Dialect::Sqlite, &q).unwrap();
+        let c = compile(Dialect::Sqlite, &q, &[]).unwrap();
         assert_eq!(c.stmt.args[0], Cell::from("[[]a]*"));
     }
 }

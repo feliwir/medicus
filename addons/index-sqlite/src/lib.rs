@@ -110,7 +110,7 @@ fn bind<'q>(
     for a in args {
         q = match a {
             Cell::Null => q.bind(None::<String>),
-            Cell::Text(s) => q.bind(s.as_str()),
+            Cell::Text(s) | Cell::Json(s) => q.bind(s.as_str()),
             Cell::Int(i) => q.bind(*i),
         };
     }
@@ -206,5 +206,35 @@ mod tests {
         };
         let index = SqlIndex::new(SqliteBackend::open(&cfg).await.unwrap());
         medicus_testkit::index::suite(&index).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn extra_tags_on_empty_index() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            path: dir.path().join("index.sqlite"),
+            name: "t".into(),
+            read_connections: 2,
+        };
+        let index = SqlIndex::new(SqliteBackend::open(&cfg).await.unwrap());
+        medicus_testkit::index::extra_tags_on_empty_index(&index).await;
+
+        // Extra values are stored as binary JSONB, not as JSON text.
+        let mut tx = index.backend().begin_read().await.unwrap();
+        let s = Stmt::raw(
+            Dialect::Sqlite,
+            "SELECT typeof(extra), json(extra) FROM instances",
+        );
+        let rows = tx
+            .fetch(&s, &[CellKind::Text, CellKind::Text])
+            .await
+            .unwrap();
+        assert_eq!(rows[0][0], Cell::from("blob"));
+        // DICOM JSON for results, match forms for queries; only tags present in the instance.
+        let stored: serde_json::Value = serde_json::from_str(rows[0][1].text().unwrap()).unwrap();
+        assert_eq!(
+            stored,
+            serde_json::json!({ "d": { "00180050": { "vr": "DS", "Value": [2.5] } }, "m": { "00180050": ["2.5"] } })
+        );
     }
 }

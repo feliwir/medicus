@@ -110,6 +110,31 @@ pub struct DeleteOutcome {
     pub removed: Vec<InstanceLocation>,
 }
 
+/// An attribute indexed in addition to the standard ones (configured by the operator).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ExtraTag {
+    pub tag: crate::Tag,
+    pub vr: crate::Vr,
+    pub level: crate::QueryLevel,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExtraTagState {
+    /// Every row carries the tag's values; queries on it are evaluated by the index.
+    Ready,
+    /// Added to a non-empty index: existing rows lack values until a backfill completes. The
+    /// index reports queries on the tag as `unfiltered`.
+    Backfilling,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ExtraTagStatus {
+    #[serde(flatten)]
+    pub tag: ExtraTag,
+    pub state: ExtraTagState,
+}
+
 /// One page of query results: DICOM JSON objects with the requested attributes of the query
 /// level, the unique keys of all higher levels, and computed attributes (e.g. counts).
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -162,6 +187,22 @@ pub trait IndexStore: Send + Sync + 'static {
 
     /// Bytes referenced per blob store, for quota accounting.
     async fn stored_bytes(&self) -> Result<BTreeMap<String, u64>>;
+
+    /// Declares the configured extra tags (called at startup). Tags that are new on a non-empty
+    /// index start as `Backfilling`; tags no longer configured are dropped. Standard attributes
+    /// and sequences are rejected (`InvalidArgument`). Returns the state of every tag.
+    async fn configure_extra_tags(&self, tags: &[ExtraTag]) -> Result<Vec<ExtraTagStatus>>;
+
+    /// Replaces the extra-tag values of an existing instance (and its parents) from
+    /// `attributes` (DICOM JSON); used by backfill jobs. `NotFound` if the instance is unknown.
+    async fn update_extra(
+        &self,
+        instance: &SopInstanceUid,
+        attributes: &DicomJsonObject,
+    ) -> Result<()>;
+
+    /// Marks a backfilled extra tag as `Ready`.
+    async fn mark_extra_ready(&self, tag: crate::Tag) -> Result<()>;
 }
 
 /// Wire format of `IndexStore` calls over the ABI (one JSON request per call).
@@ -202,6 +243,16 @@ pub enum IndexRequest {
         up_to: u64,
     },
     StoredBytes,
+    ConfigureExtraTags {
+        tags: Vec<ExtraTag>,
+    },
+    UpdateExtra {
+        instance: SopInstanceUid,
+        attributes: DicomJsonObject,
+    },
+    MarkExtraReady {
+        tag: crate::Tag,
+    },
 }
 
 impl IndexRequest {
@@ -219,6 +270,9 @@ impl IndexRequest {
         "set_cursor",
         "prune_events",
         "stored_bytes",
+        "configure_extra_tags",
+        "update_extra",
+        "mark_extra_ready",
     ];
 }
 

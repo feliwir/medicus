@@ -9,7 +9,8 @@
     clippy::unwrap_used,
     clippy::expect_used,
     clippy::missing_panics_doc,
-    clippy::too_many_lines
+    clippy::too_many_lines,
+    clippy::cast_possible_wrap
 )]
 
 pub mod blob;

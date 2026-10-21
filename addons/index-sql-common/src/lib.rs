@@ -13,20 +13,24 @@
 pub mod schema;
 pub mod sql;
 
+mod extra;
 mod query;
 mod write;
 
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use medicus_core::capability::IndexStore;
 use medicus_core::capability::index::{
-    DeleteOutcome, DuplicatePolicy, InstanceLocation, InstanceRecord, QueryResult, ResourceUid,
-    StoreOutcome,
+    DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagState, ExtraTagStatus,
+    InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome,
 };
 use medicus_core::event::Event;
 use medicus_core::query::Query;
+use medicus_core::uid::SopInstanceUid;
 use medicus_core::{Error, Result};
+use medicus_core::{Tag, Vr};
 
 pub use sql::{Backend, Cell, CellKind, Dialect, Stmt, Tx};
 
@@ -44,15 +48,71 @@ fn to_i64(v: u64) -> i64 {
 #[derive(Debug)]
 pub struct SqlIndex<B> {
     backend: B,
+    /// Cached copy of the `extra_tags` table; loaded on first use.
+    extras: RwLock<Option<Arc<Vec<ExtraTagStatus>>>>,
 }
 
 impl<B: Backend> SqlIndex<B> {
     pub fn new(backend: B) -> Self {
-        Self { backend }
+        Self {
+            backend,
+            extras: RwLock::new(None),
+        }
     }
 
     pub fn backend(&self) -> &B {
         &self.backend
+    }
+
+    fn cached_extras(&self) -> Option<Arc<Vec<ExtraTagStatus>>> {
+        self.extras
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+
+    fn set_cached_extras(&self, v: Vec<ExtraTagStatus>) -> Arc<Vec<ExtraTagStatus>> {
+        let v = Arc::new(v);
+        *self
+            .extras
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(v.clone());
+        v
+    }
+
+    async fn load_extras<T: Tx>(tx: &mut T) -> Result<Vec<ExtraTagStatus>> {
+        let s = Stmt::raw(
+            tx.dialect(),
+            "SELECT tag, vr, level, state FROM extra_tags ORDER BY tag",
+        );
+        let rows = tx.fetch(&s, &[CellKind::Text; 4]).await?;
+        rows.iter()
+            .map(|r| {
+                let text = |i: usize| r.get(i).and_then(Cell::text).unwrap_or_default();
+                let tag: Tag = text(0).parse().map_err(|_| corrupt("extra tag"))?;
+                let vr: Vr = text(1).parse().map_err(|_| corrupt("extra tag VR"))?;
+                let level =
+                    extra::parse_level(text(2)).ok_or_else(|| corrupt("extra tag level"))?;
+                let state = if text(3) == "ready" {
+                    ExtraTagState::Ready
+                } else {
+                    ExtraTagState::Backfilling
+                };
+                Ok(ExtraTagStatus {
+                    tag: ExtraTag { tag, vr, level },
+                    state,
+                })
+            })
+            .collect()
+    }
+
+    async fn extras(&self) -> Result<Arc<Vec<ExtraTagStatus>>> {
+        if let Some(e) = self.cached_extras() {
+            return Ok(e);
+        }
+        let mut tx = self.backend.begin_read().await?;
+        let loaded = Self::load_extras(&mut tx).await?;
+        Ok(self.set_cached_extras(loaded))
     }
 }
 
@@ -64,14 +124,16 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         policy: DuplicatePolicy,
         event: &Event,
     ) -> Result<StoreOutcome> {
+        let extras = self.extras().await?;
         let mut tx = self.backend.begin_write().await?;
-        let outcome = write::store_instance(&mut tx, record, policy, event).await?;
+        let outcome = write::store_instance(&mut tx, record, policy, event, &extras).await?;
         tx.commit().await?;
         Ok(outcome)
     }
 
     async fn query(&self, query: &Query) -> Result<QueryResult> {
-        let compiled = query::compile(self.backend.dialect(), query)?;
+        let extras = self.extras().await?;
+        let compiled = query::compile(self.backend.dialect(), query, &extras)?;
         let mut tx = self.backend.begin_read().await?;
         let mut rows = tx.fetch(&compiled.stmt, &compiled.kinds).await?;
         let has_more = compiled.limit.is_some_and(|l| rows.len() > l as usize);
@@ -81,7 +143,7 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         Ok(QueryResult {
             rows: rows
                 .into_iter()
-                .map(|r| query::row_to_json(&compiled.select, r))
+                .map(|r| query::row_to_json(&compiled, r, &extras))
                 .collect(),
             has_more,
             unfiltered: compiled.unfiltered,
@@ -191,5 +253,75 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
             }
         }
         Ok(out)
+    }
+
+    async fn configure_extra_tags(&self, tags: &[ExtraTag]) -> Result<Vec<ExtraTagStatus>> {
+        extra::validate(tags)?;
+        let d = self.backend.dialect();
+        let mut tx = self.backend.begin_write().await?;
+        let existing = Self::load_extras(&mut tx).await?;
+        let empty = tx
+            .fetch_one_int(&Stmt::raw(d, "SELECT COUNT(*) FROM instances"))
+            .await?
+            .unwrap_or(0)
+            == 0;
+        let mut result = Vec::with_capacity(tags.len());
+        for t in tags {
+            let state = match existing.iter().find(|e| e.tag == *t) {
+                Some(e) => e.state,
+                None if empty => ExtraTagState::Ready,
+                None => ExtraTagState::Backfilling,
+            };
+            let mut s = Stmt::new(d);
+            s.push("INSERT INTO extra_tags (tag, vr, level, state) VALUES ")
+                .bind_list([
+                    Cell::from(String::from(t.tag)),
+                    Cell::from(t.vr.as_str()),
+                    Cell::from(extra::level_name(t.level)),
+                    Cell::from(extra::state_name(state)),
+                ])
+                .push(" ON CONFLICT (tag) DO UPDATE SET vr = excluded.vr, level = excluded.level, state = excluded.state");
+            tx.execute(&s).await?;
+            result.push(ExtraTagStatus { tag: *t, state });
+        }
+        for e in existing
+            .iter()
+            .filter(|e| !tags.iter().any(|t| t.tag == e.tag.tag))
+        {
+            let mut s = Stmt::new(d);
+            s.push("DELETE FROM extra_tags WHERE tag = ")
+                .bind(String::from(e.tag.tag));
+            tx.execute(&s).await?;
+        }
+        tx.commit().await?;
+        self.set_cached_extras(result.clone());
+        Ok(result)
+    }
+
+    async fn update_extra(
+        &self,
+        instance: &SopInstanceUid,
+        attributes: &DicomJsonObject,
+    ) -> Result<()> {
+        let extras = self.extras().await?;
+        let mut tx = self.backend.begin_write().await?;
+        write::update_extra(&mut tx, instance, attributes, &extras).await?;
+        tx.commit().await
+    }
+
+    async fn mark_extra_ready(&self, tag: Tag) -> Result<()> {
+        let mut tx = self.backend.begin_write().await?;
+        let mut s = Stmt::new(self.backend.dialect());
+        s.push("UPDATE extra_tags SET state = 'ready' WHERE tag = ")
+            .bind(String::from(tag));
+        if tx.execute(&s).await? == 0 {
+            return Err(Error::not_found(format!(
+                "{tag} is not a configured extra tag"
+            )));
+        }
+        let extras = Self::load_extras(&mut tx).await?;
+        tx.commit().await?;
+        self.set_cached_extras(extras);
+        Ok(())
     }
 }

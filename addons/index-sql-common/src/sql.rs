@@ -18,6 +18,9 @@ pub enum Cell {
     Null,
     Text(String),
     Int(i64),
+    /// A JSON document, bound as text and converted to the dialect's binary JSON type
+    /// (`jsonb(?)` in `SQLite`, `$n::jsonb` in `PostgreSQL`). Only used for arguments.
+    Json(String),
 }
 
 impl Cell {
@@ -102,11 +105,18 @@ impl Stmt {
 
     /// Appends a placeholder and binds `value` to it.
     pub fn bind(&mut self, value: impl Into<Cell>) -> &mut Self {
-        self.args.push(value.into());
-        match self.dialect {
-            Dialect::Sqlite => self.sql.push('?'),
-            Dialect::Postgres => {
-                let _ = write!(self.sql, "${}", self.args.len());
+        let value = value.into();
+        let json = matches!(value, Cell::Json(_));
+        self.args.push(value);
+        let n = self.args.len();
+        match (self.dialect, json) {
+            (Dialect::Sqlite, false) => self.sql.push('?'),
+            (Dialect::Sqlite, true) => self.sql.push_str("jsonb(?)"),
+            (Dialect::Postgres, false) => {
+                let _ = write!(self.sql, "${n}");
+            }
+            (Dialect::Postgres, true) => {
+                let _ = write!(self.sql, "${n}::jsonb");
             }
         }
         self
@@ -192,5 +202,18 @@ mod tests {
             .bind_list([1i64, 2]);
         assert_eq!(s.sql, "a = ? AND b IN (?, ?)");
         assert_eq!(s.args, vec![Cell::from("x"), Cell::Int(1), Cell::Int(2)]);
+    }
+
+    #[test]
+    fn json_arguments_use_binary_json() {
+        let mut s = Stmt::new(Dialect::Sqlite);
+        s.push("x = ").bind(Cell::Json("{}".into()));
+        assert_eq!(s.sql, "x = jsonb(?)");
+        let mut s = Stmt::new(Dialect::Postgres);
+        s.push("x = ")
+            .bind(1i64)
+            .push(", y = ")
+            .bind(Cell::Json("{}".into()));
+        assert_eq!(s.sql, "x = $1, y = $2::jsonb");
     }
 }

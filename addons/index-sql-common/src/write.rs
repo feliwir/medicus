@@ -1,8 +1,8 @@
 //! Transactional write paths: storing and removing instances, events, cursors.
 
 use medicus_core::capability::index::{
-    BlobRef, DeleteOutcome, Duplicate, DuplicatePolicy, InstanceLocation, InstanceRecord,
-    ResourceUid, StoreOutcome,
+    BlobRef, DeleteOutcome, DicomJsonObject, Duplicate, DuplicatePolicy, ExtraTagStatus,
+    InstanceLocation, InstanceRecord, ResourceUid, StoreOutcome,
 };
 use medicus_core::event::Event;
 use medicus_core::query::Attributes;
@@ -11,6 +11,7 @@ use medicus_core::uid::Uid;
 use medicus_core::{BlobKey, Error, ErrorKind, QueryLevel, Result, Tag, Vr, tags};
 use time::OffsetDateTime;
 
+use crate::extra;
 use crate::schema::{COLUMNS, Storage, is_computed};
 use crate::sql::{Cell, CellKind, Stmt, Tx, TxExt as _};
 
@@ -26,7 +27,11 @@ fn first_value(record: &InstanceRecord, tag: Tag, vr: Vr) -> Option<String> {
 }
 
 /// `(column, value)` pairs to store for the attributes of `level`.
-fn level_values(record: &InstanceRecord, level: QueryLevel) -> Vec<(String, Cell)> {
+fn level_values(
+    record: &InstanceRecord,
+    level: QueryLevel,
+    extras: &[ExtraTagStatus],
+) -> Vec<(String, Cell)> {
     let mut out = Vec::new();
     for c in COLUMNS
         .iter()
@@ -59,6 +64,9 @@ fn level_values(record: &InstanceRecord, level: QueryLevel) -> Vec<(String, Cell
             )),
             Storage::StudyMulti { .. } | Storage::PatientStudyCount => {}
         }
+    }
+    if let Some(json) = extra::level_json(extras, level, &record.attributes) {
+        out.push(("extra".to_owned(), Cell::Json(json)));
     }
     out
 }
@@ -331,12 +339,13 @@ async fn apply_duplicate_policy<T: Tx>(
 async fn upsert_hierarchy<T: Tx>(
     tx: &mut T,
     record: &InstanceRecord,
+    extras: &[ExtraTagStatus],
     now: i64,
 ) -> Result<(i64, i64)> {
     let d = tx.dialect();
     let patient_id = first_value(record, tags::PATIENT_ID, Vr::LO).unwrap_or_default();
     let issuer = first_value(record, tags::ISSUER_OF_PATIENT_ID, Vr::LO).unwrap_or_default();
-    let mut patient_cols = level_values(record, QueryLevel::Patient);
+    let mut patient_cols = level_values(record, QueryLevel::Patient, extras);
     patient_cols.retain(|(n, _)| n != "patient_id" && n != "issuer");
     let mut s = Stmt::new(d);
     let key = [("patient_id", patient_id.into()), ("issuer", issuer.into())];
@@ -353,7 +362,7 @@ async fn upsert_hierarchy<T: Tx>(
         .await?
         .ok_or_else(|| corrupt("patient id"))?;
 
-    let mut study_cols = level_values(record, QueryLevel::Study);
+    let mut study_cols = level_values(record, QueryLevel::Study, extras);
     study_cols.retain(|(n, _)| n != "study_uid");
     study_cols.push(("updated_at".into(), now.into()));
     let mut s = Stmt::new(d);
@@ -368,7 +377,7 @@ async fn upsert_hierarchy<T: Tx>(
         .await?
         .ok_or_else(|| corrupt("study id"))?;
 
-    let mut series_cols = level_values(record, QueryLevel::Series);
+    let mut series_cols = level_values(record, QueryLevel::Series, extras);
     series_cols.retain(|(n, _)| n != "series_uid");
     series_cols.push(("updated_at".into(), now.into()));
     let mut s = Stmt::new(d);
@@ -403,10 +412,11 @@ async fn upsert_hierarchy<T: Tx>(
 async fn insert_instance<T: Tx>(
     tx: &mut T,
     record: &InstanceRecord,
+    extras: &[ExtraTagStatus],
     series_fk: i64,
     now: i64,
 ) -> Result<()> {
-    let mut cols = level_values(record, QueryLevel::Instance);
+    let mut cols = level_values(record, QueryLevel::Instance, extras);
     cols.retain(|(n, _)| n != "sop_uid" && n != "sop_class");
     let mut fixed: Vec<(&str, Cell)> = vec![
         ("series_fk", series_fk.into()),
@@ -478,6 +488,7 @@ pub(crate) async fn store_instance<T: Tx>(
     record: &InstanceRecord,
     policy: DuplicatePolicy,
     event: &Event,
+    extras: &[ExtraTagStatus],
 ) -> Result<StoreOutcome> {
     let now = micros(event.time);
     let duplicate = match apply_duplicate_policy(tx, record, policy, now).await? {
@@ -489,8 +500,8 @@ pub(crate) async fn store_instance<T: Tx>(
             });
         }
     };
-    let (study_fk, series_fk) = upsert_hierarchy(tx, record, now).await?;
-    insert_instance(tx, record, series_fk, now).await?;
+    let (study_fk, series_fk) = upsert_hierarchy(tx, record, extras, now).await?;
+    insert_instance(tx, record, extras, series_fk, now).await?;
     update_aggregates(tx, record, study_fk, series_fk).await?;
     // The event is part of the same transaction (transactional outbox).
     let seq = append_event(tx, event).await?;
@@ -518,4 +529,45 @@ pub(crate) async fn delete<T: Tx>(
         seq,
         removed: rows.into_iter().map(|r| r.location).collect(),
     })
+}
+
+/// Rewrites the `extra` JSON of an instance and its parents (backfill).
+pub(crate) async fn update_extra<T: Tx>(
+    tx: &mut T,
+    instance: &medicus_core::uid::SopInstanceUid,
+    attributes: &DicomJsonObject,
+    extras: &[ExtraTagStatus],
+) -> Result<()> {
+    let d = tx.dialect();
+    let mut s = Stmt::new(d);
+    s.push(
+        "SELECT i.id, se.id, st.id, st.patient_fk FROM instances i JOIN series se ON se.id = i.series_fk \
+         JOIN studies st ON st.id = se.study_fk WHERE i.sop_uid = ",
+    )
+    .bind(instance.as_str());
+    let kinds = [CellKind::Int, CellKind::Int, CellKind::Int, CellKind::Int];
+    let row = tx
+        .fetch(&s, &kinds)
+        .await?
+        .into_iter()
+        .next()
+        .ok_or_else(|| Error::not_found(format!("instance {instance} does not exist")))?;
+    let ids = [
+        QueryLevel::Instance,
+        QueryLevel::Series,
+        QueryLevel::Study,
+        QueryLevel::Patient,
+    ];
+    for (level, id) in ids.into_iter().zip(row) {
+        let Some(json) = extra::level_json(extras, level, attributes) else {
+            continue;
+        };
+        let mut s = Stmt::new(d);
+        s.push(&format!("UPDATE {} SET extra = ", extra::table(level)))
+            .bind(Cell::Json(json))
+            .push(" WHERE id = ")
+            .bind(id);
+        tx.execute(&s).await?;
+    }
+    Ok(())
 }

@@ -12,16 +12,18 @@ use medicus_abi::ffi::{
     MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange, MdStr,
 };
 use medicus_core::BlobKey;
+use medicus_core::Tag;
 use medicus_core::capability::IndexStore;
 use medicus_core::capability::index::{
-    DeleteOutcome, DuplicatePolicy, IndexRequest, InstanceLocation, InstanceRecord, QueryResult,
-    ResourceUid, StoreOutcome,
+    DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagStatus, IndexRequest,
+    InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome,
 };
 use medicus_core::capability::{
     BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, StorageUsage,
 };
 use medicus_core::event::Event;
 use medicus_core::query::Query;
+use medicus_core::uid::SopInstanceUid;
 use medicus_core::{Error, Result};
 use serde::de::DeserializeOwned;
 use tokio::runtime::Handle;
@@ -316,6 +318,29 @@ impl IndexStore for FfiIndexStore {
 
     async fn stored_bytes(&self) -> Result<BTreeMap<String, u64>> {
         self.call(IndexRequest::StoredBytes).await
+    }
+
+    async fn configure_extra_tags(&self, tags: &[ExtraTag]) -> Result<Vec<ExtraTagStatus>> {
+        self.call(IndexRequest::ConfigureExtraTags {
+            tags: tags.to_vec(),
+        })
+        .await
+    }
+
+    async fn update_extra(
+        &self,
+        instance: &SopInstanceUid,
+        attributes: &DicomJsonObject,
+    ) -> Result<()> {
+        self.call(IndexRequest::UpdateExtra {
+            instance: instance.clone(),
+            attributes: attributes.clone(),
+        })
+        .await
+    }
+
+    async fn mark_extra_ready(&self, tag: Tag) -> Result<()> {
+        self.call(IndexRequest::MarkExtraReady { tag }).await
     }
 }
 

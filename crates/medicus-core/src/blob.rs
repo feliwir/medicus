@@ -41,7 +41,7 @@ impl BlobKind {
     fn suffix(self) -> &'static str {
         match self {
             Self::Instance => "dcm",
-            Self::SeriesMetadata => "series"
+            Self::SeriesMetadata => "series",
         }
     }
 }

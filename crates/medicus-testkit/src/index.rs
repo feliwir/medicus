@@ -4,7 +4,8 @@ use std::collections::BTreeSet;
 
 use medicus_core::capability::IndexStore;
 use medicus_core::capability::index::{
-    BlobRef, DicomJsonObject, Duplicate, DuplicatePolicy, InstanceRecord, ResourceUid,
+    BlobRef, DicomJsonObject, Duplicate, DuplicatePolicy, ExtraTag, ExtraTagState, InstanceRecord,
+    ResourceUid,
 };
 use medicus_core::event::{Event, EventKind, Origin};
 use medicus_core::query::{DicomJson, Key, MatchOptions, OrderBy, OrderKey, Query};
@@ -120,8 +121,59 @@ pub async fn suite(index: &dyn IndexStore) {
     matching_parity(index).await;
     paging_and_order(index).await;
     unfiltered_and_level_errors(index).await;
+    extra_tags(index).await;
     events_and_cursors(index).await;
+    counters_match_recount(index).await;
     deletion(index).await;
+    counters_match_recount(index).await;
+}
+
+/// Maintained counters (`NumberOfStudyRelated*`, `NumberOfSeriesRelatedInstances`) must always
+/// equal a recount of what the index actually holds.
+async fn counters_match_recount(index: &dyn IndexStore) {
+    let studies = index
+        .query(&Query::new(QueryLevel::Study))
+        .await
+        .unwrap()
+        .rows;
+    assert!(!studies.is_empty());
+    for row in &studies {
+        let uid = string_values(row, tags::STUDY_INSTANCE_UID).remove(0);
+        let located = index
+            .locate(&ResourceUid::Study(StudyInstanceUid::parse(&uid).unwrap()))
+            .await
+            .unwrap();
+        let series: BTreeSet<&str> = located.iter().map(|l| l.series.as_str()).collect();
+        assert_eq!(
+            int_value(row, tags::NUMBER_OF_STUDY_RELATED_INSTANCES),
+            Some(located.len() as i64),
+            "study {uid}"
+        );
+        assert_eq!(
+            int_value(row, tags::NUMBER_OF_STUDY_RELATED_SERIES),
+            Some(series.len() as i64),
+            "study {uid}"
+        );
+    }
+    for row in index
+        .query(&Query::new(QueryLevel::Series))
+        .await
+        .unwrap()
+        .rows
+    {
+        let uid = string_values(&row, tags::SERIES_INSTANCE_UID).remove(0);
+        let located = index
+            .locate(&ResourceUid::Series(
+                SeriesInstanceUid::parse(&uid).unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            int_value(&row, tags::NUMBER_OF_SERIES_RELATED_INSTANCES),
+            Some(located.len() as i64),
+            "series {uid}"
+        );
+    }
 }
 
 async fn hierarchy_and_counts(index: &dyn IndexStore) {
@@ -570,5 +622,339 @@ async fn deletion(index: &dyn IndexStore) {
     assert_eq!(
         int_value(&rows[0], tags::NUMBER_OF_PATIENT_RELATED_STUDIES),
         Some(2)
+    );
+}
+
+/// Adds an attribute with an explicit VR (for non-standard tags) to a record.
+pub fn with_attribute(mut r: InstanceRecord, tag: Tag, vr: Vr, values: &[&str]) -> InstanceRecord {
+    let vals: Vec<Value> = values
+        .iter()
+        .map(|v| match vr {
+            Vr::PN => json!({ "Alphabetic": v }),
+            Vr::IS | Vr::DS => v.parse::<f64>().map_or_else(|_| json!(v), |n| json!(n)),
+            _ => json!(v),
+        })
+        .collect();
+    r.attributes.insert(
+        String::from(tag),
+        json!({ "vr": vr.as_str(), "Value": vals }),
+    );
+    r
+}
+
+const SLICE_THICKNESS: Tag = Tag::new(0x0018, 0x0050);
+const IMAGE_TYPE: Tag = Tag::new(0x0008, 0x0008);
+const ACQUISITION_DATE: Tag = Tag::new(0x0008, 0x0022);
+const PROTOCOL_NAME: Tag = Tag::new(0x0018, 0x1030);
+const OPERATORS_NAME: Tag = Tag::new(0x0008, 0x1070);
+
+fn extra_config() -> Vec<ExtraTag> {
+    vec![
+        ExtraTag {
+            tag: SLICE_THICKNESS,
+            vr: Vr::DS,
+            level: QueryLevel::Instance,
+        },
+        ExtraTag {
+            tag: IMAGE_TYPE,
+            vr: Vr::CS,
+            level: QueryLevel::Instance,
+        },
+        ExtraTag {
+            tag: ACQUISITION_DATE,
+            vr: Vr::DA,
+            level: QueryLevel::Instance,
+        },
+        ExtraTag {
+            tag: PROTOCOL_NAME,
+            vr: Vr::LO,
+            level: QueryLevel::Series,
+        },
+        ExtraTag {
+            tag: OPERATORS_NAME,
+            vr: Vr::PN,
+            level: QueryLevel::Series,
+        },
+    ]
+}
+
+fn instance_query(keys: &[(Tag, Vr, &str)]) -> Query {
+    keys.iter()
+        .fold(Query::new(QueryLevel::Instance), |q, (tag, vr, v)| {
+            q.with_key(Key::parse(*tag, *vr, v, &MatchOptions::default()).unwrap())
+        })
+}
+
+/// On an empty index, newly configured extra tags are immediately ready. The index must be empty.
+pub async fn extra_tags_on_empty_index(index: &dyn IndexStore) {
+    let status = index.configure_extra_tags(&extra_config()).await.unwrap();
+    assert!(
+        status.iter().all(|s| s.state == ExtraTagState::Ready),
+        "{status:?}"
+    );
+    let r = with_attribute(
+        record("8.1", "8.1.1", "8.1.1.1", CT, &[]),
+        SLICE_THICKNESS,
+        Vr::DS,
+        &["2.5"],
+    );
+    index
+        .store_instance(
+            &r,
+            DuplicatePolicy::Reject,
+            &event(EventKind::InstanceStored),
+        )
+        .await
+        .unwrap();
+    let q = instance_query(&[(SLICE_THICKNESS, Vr::DS, "2.50")]);
+    let res = index.query(&q).await.unwrap();
+    assert!(res.unfiltered.is_empty());
+    assert_eq!(res.rows.len(), 1);
+    // Extra tags are returned in their original DICOM JSON form.
+    assert_eq!(
+        res.rows[0][&String::from(SLICE_THICKNESS)],
+        json!({ "vr": "DS", "Value": [2.5] })
+    );
+}
+
+async fn extra_tags(index: &dyn IndexStore) {
+    // Configuration errors.
+    let standard = ExtraTag {
+        tag: tags::MODALITY,
+        vr: Vr::CS,
+        level: QueryLevel::Series,
+    };
+    assert_eq!(
+        index
+            .configure_extra_tags(&[standard])
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::InvalidArgument
+    );
+
+    // The index already holds instances, so new tags need a backfill first.
+    let status = index.configure_extra_tags(&extra_config()).await.unwrap();
+    assert!(
+        status.iter().all(|s| s.state == ExtraTagState::Backfilling),
+        "{status:?}"
+    );
+    let q = instance_query(&[(SLICE_THICKNESS, Vr::DS, "1.5")]);
+    assert_eq!(
+        index.query(&q).await.unwrap().unfiltered,
+        vec![SLICE_THICKNESS]
+    );
+    for t in extra_config() {
+        index.mark_extra_ready(t.tag).await.unwrap();
+    }
+    assert_eq!(
+        index
+            .mark_extra_ready(Tag::new(0x0011, 0x0011))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
+    // Re-configuring keeps the state.
+    let status = index.configure_extra_tags(&extra_config()).await.unwrap();
+    assert!(status.iter().all(|s| s.state == ExtraTagState::Ready));
+
+    let mk = |sop: &str,
+              series: &str,
+              thick: &str,
+              types: &[&str],
+              date: &str,
+              protocol: &str,
+              op: &str| {
+        let r = record("7.1", series, sop, CT, &[(tags::PATIENT_ID, "X7")]);
+        let r = with_attribute(r, SLICE_THICKNESS, Vr::DS, &[thick]);
+        let r = with_attribute(r, IMAGE_TYPE, Vr::CS, types);
+        let r = with_attribute(r, ACQUISITION_DATE, Vr::DA, &[date]);
+        let r = with_attribute(r, PROTOCOL_NAME, Vr::LO, &[protocol]);
+        with_attribute(r, OPERATORS_NAME, Vr::PN, &[op])
+    };
+    let records = vec![
+        mk(
+            "7.1.1.1",
+            "7.1.1",
+            "1.5",
+            &["ORIGINAL", "PRIMARY", "AXIAL"],
+            "20240105",
+            "Chest Routine",
+            "Smith^Anna",
+        ),
+        mk(
+            "7.1.1.2",
+            "7.1.1",
+            "1.50",
+            &["DERIVED", "SECONDARY"],
+            "20240106",
+            "Chest Routine",
+            "Smith^Anna",
+        ),
+        mk(
+            "7.1.2.1",
+            "7.1.2",
+            "5",
+            &["ORIGINAL", "PRIMARY", "LOCALIZER"],
+            "20231231",
+            "Scout [low dose]",
+            "Brown^Bob",
+        ),
+    ];
+    for r in &records {
+        index
+            .store_instance(
+                r,
+                DuplicatePolicy::Reject,
+                &event(EventKind::InstanceStored),
+            )
+            .await
+            .unwrap();
+    }
+
+    let queries: Vec<Vec<(Tag, Vr, &str)>> = vec![
+        vec![(SLICE_THICKNESS, Vr::DS, "1.5")],
+        vec![(SLICE_THICKNESS, Vr::DS, "5.0")],
+        vec![(IMAGE_TYPE, Vr::CS, "PRIMARY")],
+        vec![(IMAGE_TYPE, Vr::CS, "LOCALIZER\\AXIAL")],
+        vec![(IMAGE_TYPE, Vr::CS, "*ARY")],
+        vec![(ACQUISITION_DATE, Vr::DA, "20240101-")],
+        vec![(ACQUISITION_DATE, Vr::DA, "-20231231")],
+        vec![(PROTOCOL_NAME, Vr::LO, "Chest*")],
+        vec![(PROTOCOL_NAME, Vr::LO, "*[low dose]")],
+        vec![(OPERATORS_NAME, Vr::PN, "smith^anna")],
+        vec![(OPERATORS_NAME, Vr::PN, "B*")],
+        vec![
+            (SLICE_THICKNESS, Vr::DS, "1.5"),
+            (IMAGE_TYPE, Vr::CS, "DERIVED"),
+        ],
+    ];
+    let instances = records
+        .iter()
+        .map(|r| r.instance.as_str())
+        .collect::<Vec<_>>()
+        .join("\\");
+    let mut counts = Vec::new();
+    for keys in queries {
+        let mut q = instance_query(&keys);
+        q.keys.push(
+            Key::parse(
+                tags::SOP_INSTANCE_UID,
+                Vr::UI,
+                &instances,
+                &MatchOptions::default(),
+            )
+            .unwrap(),
+        );
+        let res = index.query(&q).await.unwrap();
+        assert!(
+            res.unfiltered.is_empty(),
+            "{keys:?} not evaluated by the index"
+        );
+        let got: BTreeSet<String> = res
+            .rows
+            .iter()
+            .flat_map(|r| string_values(r, tags::SOP_INSTANCE_UID))
+            .collect();
+        let expected: BTreeSet<String> = records
+            .iter()
+            .filter(|r| q.matches(&DicomJson::new(&r.attributes)))
+            .map(|r| r.instance.to_string())
+            .collect();
+        assert_eq!(
+            got, expected,
+            "index and in-memory matcher disagree for {keys:?}"
+        );
+        counts.push(got.len());
+    }
+    // Guard against vacuous agreement: known answers for some of the queries above.
+    assert_eq!(counts[0], 2, "1.5 and 1.50 are numerically equal");
+    assert_eq!(counts[2], 2);
+    assert_eq!(counts[3], 2, "any of LOCALIZER, AXIAL");
+    assert_eq!(counts[9], 2, "case-insensitive PN");
+    assert_eq!(counts[11], 1);
+
+    // Series-level extra tags are usable at series level; instance-level ones are not.
+    let mut sq = Query::new(QueryLevel::Series);
+    sq.keys
+        .push(Key::parse(PROTOCOL_NAME, Vr::LO, "Scout*", &MatchOptions::default()).unwrap());
+    let rows = index.query(&sq).await.unwrap().rows;
+    assert_eq!(
+        rows.iter()
+            .flat_map(|r| string_values(r, tags::SERIES_INSTANCE_UID))
+            .collect::<Vec<_>>(),
+        ["7.1.2"]
+    );
+    let mut bad = Query::new(QueryLevel::Series);
+    bad.keys
+        .push(Key::parse(SLICE_THICKNESS, Vr::DS, "1", &MatchOptions::default()).unwrap());
+    assert_eq!(
+        index.query(&bad).await.unwrap_err().kind,
+        ErrorKind::InvalidArgument
+    );
+
+    // Backfill an instance stored before the tags were configured.
+    let old = SopInstanceUid::parse("2.1.1.1").unwrap();
+    let attrs = with_attribute(
+        record("2.1", "2.1.1", "2.1.1.1", CT, &[]),
+        SLICE_THICKNESS,
+        Vr::DS,
+        &["9"],
+    )
+    .attributes;
+    index.update_extra(&old, &attrs).await.unwrap();
+    let rows = index
+        .query(&instance_query(&[(SLICE_THICKNESS, Vr::DS, "9")]))
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(
+        rows.iter()
+            .flat_map(|r| string_values(r, tags::SOP_INSTANCE_UID))
+            .collect::<Vec<_>>(),
+        ["2.1.1.1"]
+    );
+    let missing = SopInstanceUid::parse("9.9.9.9").unwrap();
+    assert_eq!(
+        index.update_extra(&missing, &attrs).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+
+    // Results carry extra tags of all selected levels as DICOM JSON (multi-valued, PN as object).
+    let mut one = instance_query(&[]);
+    one.keys.push(
+        Key::parse(
+            tags::SOP_INSTANCE_UID,
+            Vr::UI,
+            "7.1.2.1",
+            &MatchOptions::default(),
+        )
+        .unwrap(),
+    );
+    let row = &index.query(&one).await.unwrap().rows[0];
+    assert_eq!(
+        row[&String::from(IMAGE_TYPE)]["Value"],
+        json!(["ORIGINAL", "PRIMARY", "LOCALIZER"])
+    );
+    assert_eq!(
+        row[&String::from(OPERATORS_NAME)]["Value"][0]["Alphabetic"],
+        "Brown^Bob"
+    );
+    assert_eq!(row[&String::from(PROTOCOL_NAME)]["vr"], "LO");
+
+    // Removing a tag from the configuration makes queries on it unfiltered again.
+    index
+        .configure_extra_tags(&extra_config()[1..])
+        .await
+        .unwrap();
+    assert_eq!(
+        index.query(&q).await.unwrap().unfiltered,
+        vec![SLICE_THICKNESS]
+    );
+    let row = &index.query(&one).await.unwrap().rows[0];
+    assert!(
+        !row.contains_key(&String::from(SLICE_THICKNESS)),
+        "dropped tags are not returned"
     );
 }

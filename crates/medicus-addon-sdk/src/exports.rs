@@ -310,6 +310,14 @@ async fn dispatch_index(
         }
         IndexRequest::PruneEvents { up_to } => json(&index.prune_events(up_to).await?),
         IndexRequest::StoredBytes => json(&index.stored_bytes().await?),
+        IndexRequest::ConfigureExtraTags { tags } => {
+            json(&index.configure_extra_tags(&tags).await?)
+        }
+        IndexRequest::UpdateExtra {
+            instance,
+            attributes,
+        } => json(&index.update_extra(&instance, &attributes).await?),
+        IndexRequest::MarkExtraReady { tag } => json(&index.mark_extra_ready(tag).await?),
     }
 }
 
