@@ -5,10 +5,11 @@ use std::sync::Arc;
 
 use medicus_abi::bridge::{OwnedBuffer, target};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_OK, MdAddonInfo, MdHostApi, MdStr,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_OK, MdAddonInfo,
+    MdHostApi, MdStr,
 };
 use medicus_core::Error;
-use medicus_core::capability::{BlobStore, EventHook};
+use medicus_core::capability::{BlobStore, EventHook, IndexStore};
 use serde::de::DeserializeOwned;
 
 use crate::{exports, logging};
@@ -81,6 +82,21 @@ impl Registrar {
             vtable.cast(),
             instance,
             exports::destroy_event_hook,
+        )
+    }
+
+    pub fn register_index_store(
+        &mut self,
+        name: &str,
+        index: impl IndexStore,
+    ) -> Result<(), Error> {
+        let (vtable, instance) = exports::index_store(Arc::new(index));
+        self.register(
+            MD_CAP_INDEX_STORE,
+            name,
+            vtable.cast(),
+            instance,
+            exports::destroy_index_store,
         )
     }
 

@@ -12,11 +12,12 @@ use std::sync::Arc;
 use futures::FutureExt as _;
 use medicus_abi::bridge::{CompletionGuard, StreamCompletionGuard, export_stream, import_stream};
 use medicus_abi::ffi::{
-    MD_PANICKED, MdBlobStoreVtable, MdBuffer, MdCancel, MdCompletion, MdEventHookVtable, MdRange,
-    MdReadStream, MdStr, MdStreamCompletion,
+    MD_PANICKED, MdBlobStoreVtable, MdBuffer, MdCancel, MdCompletion, MdEventHookVtable,
+    MdIndexStoreVtable, MdRange, MdReadStream, MdStr, MdStreamCompletion,
 };
 use medicus_core::BlobKey;
-use medicus_core::capability::{BlobStore, EventHook};
+use medicus_core::capability::index::IndexRequest;
+use medicus_core::capability::{BlobStore, EventHook, IndexStore};
 use medicus_core::event::Event;
 use medicus_core::{Error, Result};
 use serde::Serialize;
@@ -245,5 +246,97 @@ pub(crate) unsafe extern "C" fn destroy_event_hook(instance: *mut c_void) {
     guarded(|| {
         // SAFETY: called exactly once per instance created by `event_hook`.
         drop(unsafe { Box::from_raw(instance.cast::<DynEventHook>()) });
+    });
+}
+
+// ------------------------------------------------------------------------------------------------
+// IndexStore
+
+type DynIndexStore = Arc<dyn IndexStore>;
+
+static INDEX_STORE_VTABLE: MdIndexStoreVtable = MdIndexStoreVtable {
+    size: size_of::<MdIndexStoreVtable>(),
+    call: index_call,
+    destroy: destroy_index_store,
+};
+
+pub(crate) fn index_store(index: DynIndexStore) -> (*const MdIndexStoreVtable, *mut c_void) {
+    (
+        &raw const INDEX_STORE_VTABLE,
+        Box::into_raw(Box::new(index)).cast(),
+    )
+}
+
+/// Decodes a request; distinguishes methods unknown to this SDK version (`Unsupported`) from
+/// malformed arguments (`InvalidArgument`).
+fn decode_index_request(bytes: &[u8]) -> Result<IndexRequest> {
+    serde_json::from_slice(bytes).map_err(|e| {
+        let method = serde_json::from_slice::<serde_json::Value>(bytes)
+            .ok()
+            .and_then(|v| v.get("method").and_then(|m| m.as_str().map(str::to_owned)));
+        match method {
+            Some(m) if !IndexRequest::METHODS.contains(&m.as_str()) => {
+                Error::unsupported(format!("index method {m:?} is not supported by this addon"))
+            }
+            _ => Error::invalid_argument(format!("invalid index request: {e}")),
+        }
+    })
+}
+
+async fn dispatch_index(
+    index: &dyn IndexStore,
+    request: IndexRequest,
+) -> Result<serde_json::Value> {
+    fn json<T: Serialize>(v: &T) -> Result<serde_json::Value> {
+        serde_json::to_value(v).map_err(|e| Error::internal(e.to_string()))
+    }
+    match request {
+        IndexRequest::StoreInstance {
+            record,
+            policy,
+            event,
+        } => json(&index.store_instance(&record, policy, &event).await?),
+        IndexRequest::Query { query } => json(&index.query(&query).await?),
+        IndexRequest::Locate { resource } => json(&index.locate(&resource).await?),
+        IndexRequest::Delete { resource, event } => json(&index.delete(&resource, &event).await?),
+        IndexRequest::AppendEvent { event } => json(&index.append_event(&event).await?),
+        IndexRequest::EventsAfter { after, limit } => {
+            json(&index.events_after(after, limit).await?)
+        }
+        IndexRequest::LastEventSeq => json(&index.last_event_seq().await?),
+        IndexRequest::Cursor { subscriber } => json(&index.cursor(&subscriber).await?),
+        IndexRequest::SetCursor { subscriber, seq } => {
+            json(&index.set_cursor(&subscriber, seq).await?)
+        }
+        IndexRequest::PruneEvents { up_to } => json(&index.prune_events(up_to).await?),
+        IndexRequest::StoredBytes => json(&index.stored_bytes().await?),
+    }
+}
+
+unsafe extern "C" fn index_call(
+    instance: *mut c_void,
+    request: MdStr,
+    _cancel: MdCancel,
+    done: MdCompletion,
+) {
+    let guard = CompletionGuard::new(done);
+    guarded(move || {
+        // SAFETY: live instance; `request` is valid during this call.
+        let (index, bytes) = unsafe { (&*instance.cast::<DynIndexStore>(), request.as_bytes()) };
+        let index = index.clone();
+        match decode_index_request(bytes) {
+            Ok(req) => spawn_json(
+                guard,
+                async move { dispatch_index(index.as_ref(), req).await },
+            ),
+            Err(e) => guard.err(&e),
+        }
+    });
+}
+
+pub(crate) unsafe extern "C" fn destroy_index_store(instance: *mut c_void) {
+    guarded(|| {
+        // SAFETY: called exactly once per instance created by `index_store`.
+        drop(unsafe { Box::from_raw(instance.cast::<DynIndexStore>()) });
     });
 }

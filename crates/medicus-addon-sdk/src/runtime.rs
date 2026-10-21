@@ -24,3 +24,25 @@ pub fn runtime() -> &'static Handle {
         })
         .handle()
 }
+
+/// Runs `fut` to completion on the addon runtime from synchronous code, typically an addon's
+/// `init` (e.g. to open a connection pool).
+///
+/// Safe to call from a thread that is itself driving an async runtime (as when the addon is
+/// linked statically and loaded from async host code): the future is driven by a scoped helper
+/// thread, so no runtime is ever entered recursively.
+///
+/// # Panics
+/// Re-raises a panic of `fut`.
+pub fn block_on<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send,
+    F::Output: Send,
+{
+    let handle = runtime();
+    std::thread::scope(|s| {
+        s.spawn(|| handle.block_on(fut))
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}

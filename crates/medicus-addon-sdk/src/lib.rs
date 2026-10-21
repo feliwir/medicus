@@ -33,12 +33,39 @@ pub use async_trait::async_trait;
 pub use medicus_abi as abi;
 pub use medicus_core;
 pub use registrar::Registrar;
-pub use runtime::runtime;
+pub use runtime::{block_on, runtime};
 pub use tracing;
 
 #[doc(hidden)]
 pub mod __private {
     pub use crate::registrar::init;
+}
+
+/// Creates a [`StaticAddon`](medicus_abi::StaticAddon) for linking an addon into a host binary,
+/// **without** exporting any symbols. Several addons can therefore be linked into one binary.
+///
+/// Use this in an addon's library crate; a separate small `cdylib` crate calls
+/// [`export_addon!`] with the same `init` function to produce the loadable library.
+#[macro_export]
+macro_rules! static_addon {
+    (name = $name:expr, version = $version:expr, init = $init:path $(,)?) => {{
+        // Item names are not hygienic in `macro_rules!`; prefixed so they cannot shadow `$init`.
+        #[allow(unsafe_code)]
+        unsafe extern "C" fn __medicus_static_abi_version() -> u32 {
+            $crate::abi::ffi::MD_ABI_VERSION
+        }
+        #[allow(unsafe_code)]
+        unsafe extern "C" fn __medicus_static_init(
+            host: *const $crate::abi::ffi::MdHostApi,
+        ) -> *const $crate::abi::ffi::MdAddonInfo {
+            // SAFETY: called by the host with a valid, process-lifetime `MdHostApi`.
+            unsafe { $crate::__private::init(host, $name, $version, $init) }
+        }
+        $crate::abi::StaticAddon {
+            abi_version: __medicus_static_abi_version,
+            init: __medicus_static_init,
+        }
+    }};
 }
 
 /// Exports the addon's C entry points (`medicus_addon_abi_version`, `medicus_addon_init`) and a
