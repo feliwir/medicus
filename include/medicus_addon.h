@@ -257,13 +257,20 @@ typedef const struct MdAddonInfo *(*MdInitFn)(const struct MdHostApi *host);
 
 #define MD_PANICKED 10
 
+/* Marks the two entry points as exported from the shared library. */
+#if defined(_WIN32)
+#define MEDICUS_ADDON_EXPORT __declspec(dllexport)
+#else
+#define MEDICUS_ADDON_EXPORT __attribute__((visibility("default")))
+#endif
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 /* Entry points every addon exports. */
-uint32_t medicus_addon_abi_version(void);
-const MdAddonInfo *medicus_addon_init(const MdHostApi *host);
+MEDICUS_ADDON_EXPORT uint32_t medicus_addon_abi_version(void);
+MEDICUS_ADDON_EXPORT const MdAddonInfo *medicus_addon_init(const MdHostApi *host);
 
 #ifdef __cplusplus
 }  /* extern "C" */

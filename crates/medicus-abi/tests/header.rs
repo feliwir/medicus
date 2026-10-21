@@ -39,10 +39,16 @@ fn generate() -> String {
                 .into(),
         ),
         trailer: Some(
-            "#ifdef __cplusplus\nextern \"C\" {\n#endif\n\n\
+            "/* Marks the two entry points as exported from the shared library. */\n\
+             #if defined(_WIN32)\n\
+             #define MEDICUS_ADDON_EXPORT __declspec(dllexport)\n\
+             #else\n\
+             #define MEDICUS_ADDON_EXPORT __attribute__((visibility(\"default\")))\n\
+             #endif\n\n\
+             #ifdef __cplusplus\nextern \"C\" {\n#endif\n\n\
              /* Entry points every addon exports. */\n\
-             uint32_t medicus_addon_abi_version(void);\n\
-             const MdAddonInfo *medicus_addon_init(const MdHostApi *host);\n\n\
+             MEDICUS_ADDON_EXPORT uint32_t medicus_addon_abi_version(void);\n\
+             MEDICUS_ADDON_EXPORT const MdAddonInfo *medicus_addon_init(const MdHostApi *host);\n\n\
              #ifdef __cplusplus\n}  /* extern \"C\" */\n#endif\n\n\
              #endif  /* MEDICUS_ADDON_H */"
                 .into(),
@@ -76,7 +82,7 @@ fn header_is_up_to_date() {
     assert!(
         current == generated,
         "include/medicus_addon.h is out of date with src/ffi.rs.\n\
-         If the ABI change is intended, bump MD_ABI_MINOR/MAJOR, note it in docs/abi-changelog.md \
+         If the ABI change is intended, bump MD_ABI_MINOR/MAJOR, note it in include/CHANGELOG.md \
          and run: UPDATE_HEADER=1 cargo test -p medicus-abi --test header"
     );
 }
