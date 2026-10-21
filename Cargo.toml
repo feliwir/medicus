@@ -14,6 +14,7 @@ medicus-core = { path = "crates/medicus-core" }
 medicus-abi = { path = "crates/medicus-abi" }
 medicus-addon-sdk = { path = "crates/medicus-addon-sdk" }
 medicus-host = { path = "crates/medicus-host" }
+medicus-testkit = { path = "crates/medicus-testkit" }
 
 anyhow = "1"
 async-trait = "0.1"
