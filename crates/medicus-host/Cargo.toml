@@ -21,6 +21,10 @@ tracing.workspace = true
 
 [dev-dependencies]
 example-c = { path = "../../addons/example-c" }
+index-sqlite = { path = "../../addons/index-sqlite" }
+medicus-testkit.workspace = true
+storage-fs = { path = "../../addons/storage-fs" }
+tempfile.workspace = true
 test-addon = { path = "../../addons/test-addon" }
 
 bytes.workspace = true

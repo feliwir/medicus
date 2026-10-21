@@ -56,42 +56,7 @@ fn store(addon: &LoadedAddon) -> Arc<dyn BlobStore> {
 }
 
 async fn exercise_blob_store(store: &dyn BlobStore) {
-    // 5 MB in 100 KB chunks: many chunks in both directions.
-    let payload = data(5 * 1024 * 1024 + 17);
-    let k = key("ab/cd/blob.dcm");
-    let meta = store.put(&k, stream(&payload, 100 * 1024)).await.unwrap();
-    assert_eq!(meta.size, payload.len() as u64);
-
-    assert_eq!(read_all(store.get(&k, None).await.unwrap()).await, payload);
-    let ranged = read_all(store.get(&k, Some(1000..200_000)).await.unwrap()).await;
-    assert_eq!(ranged, payload[1000..200_000]);
-    assert_eq!(
-        store.stat(&k).await.unwrap().unwrap().size,
-        payload.len() as u64
-    );
-    // `None` (no physical limit) is legitimate; if reported, usage must account for the blob.
-    if let Some(usage) = store.usage().await.unwrap() {
-        assert!(usage.used >= payload.len() as u64);
-    }
-
-    let missing = store.get(&key("no/such/blob"), None).await.err().unwrap();
-    assert_eq!(missing.kind, ErrorKind::NotFound);
-    #[allow(clippy::reversed_empty_ranges)] // deliberately invalid
-    let bad_range = store.get(&k, Some(10..5)).await.err().unwrap();
-    assert_eq!(bad_range.kind, ErrorKind::InvalidArgument);
-
-    store.delete(&k).await.unwrap();
-    store.delete(&k).await.unwrap(); // idempotent
-    assert!(store.stat(&k).await.unwrap().is_none());
-
-    // An empty blob round-trips too.
-    let e = key("empty");
-    assert_eq!(store.put(&e, stream(&[], 1)).await.unwrap().size, 0);
-    assert!(
-        read_all(store.get(&e, None).await.unwrap())
-            .await
-            .is_empty()
-    );
+    medicus_testkit::blob::suite(store).await;
 }
 
 #[tokio::test(flavor = "multi_thread")]
