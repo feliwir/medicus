@@ -1,0 +1,22 @@
+[package]
+name = "medicus-abi"
+description = "The C ABI between the medicus host and its addons (ADR-0001), plus safe Rust bridging helpers."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+medicus-core.workspace = true
+
+bytes.workspace = true
+futures.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[dev-dependencies]
+cbindgen.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true
