@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = []
+members = ["crates/*"]
 
 [workspace.package]
 version = "0.1.0"
@@ -10,6 +10,7 @@ license = "MIT"
 authors = ["Stephan Vedder"]
 
 [workspace.dependencies]
+medicus-core = { path = "crates/medicus-core" }
 
 anyhow = "1"
 async-trait = "0.1"
