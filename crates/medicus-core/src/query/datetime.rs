@@ -178,6 +178,36 @@ pub(crate) fn datetime(raw: &str) -> Option<Interval> {
     })
 }
 
+/// Canonical, lexically sortable text of an interval bound, for storage in an index:
+/// DA → `YYYYMMDD`, TM → `HHMMSSffffff` (µs). Lexical order equals chronological order.
+pub(crate) fn sortable(vr: crate::Vr, raw: &str, upper: bool) -> Option<String> {
+    match vr {
+        crate::Vr::DA => {
+            let i = date(raw)?;
+            let jd = i32::try_from(if upper { i.hi } else { i.lo }).ok()?;
+            let d = Date::from_julian_day(jd).ok()?;
+            Some(format!(
+                "{:04}{:02}{:02}",
+                d.year(),
+                u8::from(d.month()),
+                d.day()
+            ))
+        }
+        crate::Vr::TM => {
+            let i = time(raw)?;
+            let us = if upper { i.hi } else { i.lo };
+            let (h, rest) = (us / (3600 * US_PER_SEC), us % (3600 * US_PER_SEC));
+            let (m, rest) = (rest / (60 * US_PER_SEC), rest % (60 * US_PER_SEC));
+            Some(format!(
+                "{h:02}{m:02}{:02}{:06}",
+                rest / US_PER_SEC,
+                rest % US_PER_SEC
+            ))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -221,6 +251,22 @@ mod tests {
         assert_eq!(m.hi + 1 - m.lo, 29 * US_PER_DAY);
         assert!(datetime("2024021").is_none());
         assert!(datetime("20240230").is_none());
+    }
+
+    #[test]
+    fn sortable_forms() {
+        use crate::Vr;
+        assert_eq!(sortable(Vr::DA, "2024.03.15", false).unwrap(), "20240315");
+        assert_eq!(sortable(Vr::TM, "10", false).unwrap(), "100000000000");
+        assert_eq!(sortable(Vr::TM, "10", true).unwrap(), "105959999999");
+        assert_eq!(
+            sortable(Vr::TM, "10:15:30.5", false).unwrap(),
+            "101530500000"
+        );
+        assert!(
+            sortable(Vr::TM, "1015", false).unwrap() < sortable(Vr::TM, "101530", false).unwrap()
+        );
+        assert!(sortable(Vr::DT, "2024", false).is_none());
     }
 
     #[test]

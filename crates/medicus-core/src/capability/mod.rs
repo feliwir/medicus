@@ -12,6 +12,10 @@ use bytes::Bytes;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
+pub mod index;
+
+pub use index::IndexStore;
+
 use crate::BlobKey;
 use crate::error::Result;
 use crate::event::{Event, EventKind};
@@ -25,6 +29,7 @@ pub type ByteStream = Pin<Box<dyn Stream<Item = Result<Bytes>> + Send + 'static>
 pub enum CapabilityKind {
     BlobStore,
     EventHook,
+    IndexStore,
 }
 
 /// Metadata of a stored blob.

@@ -269,6 +269,19 @@ pub mod tags {
     pub const TRANSFER_SYNTAX_UID: Tag = Tag::new(0x0002, 0x0010);
     pub const PIXEL_DATA: Tag = Tag::new(0x7FE0, 0x0010);
 
+    /// The VR of a standard attribute (usable in constant contexts).
+    pub const fn standard_vr(tag: Tag) -> Option<Vr> {
+        let mut i = 0;
+        while i < STANDARD.len() {
+            let a = &STANDARD[i];
+            if a.tag.group == tag.group && a.tag.element == tag.element {
+                return Some(a.vr);
+            }
+            i += 1;
+        }
+        None
+    }
+
     /// Looks up a standard attribute by tag.
     pub fn standard(tag: Tag) -> Option<&'static Attribute> {
         STANDARD.iter().find(|a| a.tag == tag)

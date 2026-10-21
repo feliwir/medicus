@@ -145,7 +145,7 @@ impl Matcher {
 
 /// Removes insignificant padding: trailing spaces (and NUL for UI); leading spaces except for text
 /// VRs where they are significant. PN values additionally drop trailing empty components.
-fn normalize(vr: Vr, raw: &str) -> String {
+pub(crate) fn normalize(vr: Vr, raw: &str) -> String {
     let s = raw.trim_end_matches([' ', '\0']);
     let s = if vr.leading_space_significant() {
         s

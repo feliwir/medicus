@@ -16,6 +16,34 @@ use serde::{Deserialize, Serialize};
 pub use dicom_json::DicomJson;
 pub use matcher::Matcher;
 
+/// Value normalization shared by the in-memory matcher and index backends, so that SQL
+/// evaluation agrees with [`Query::matches`].
+pub mod values {
+    use crate::Vr;
+
+    /// Removes insignificant padding (and trailing empty PN components), as the matcher does.
+    pub fn normalize(vr: Vr, raw: &str) -> String {
+        super::matcher::normalize(vr, raw)
+    }
+
+    /// Canonical, lexically sortable form of a DA or TM value (lower end of its interval), e.g.
+    /// for an index column. `None` for other VRs or invalid values.
+    pub fn sortable_lower(vr: Vr, raw: &str) -> Option<String> {
+        super::datetime::sortable(vr, raw, false)
+    }
+
+    /// Like [`sortable_lower`], for the upper end of the value's interval (the TM `"10"` covers
+    /// up to 10:59:59.999999). Used for the end of a range.
+    pub fn sortable_upper(vr: Vr, raw: &str) -> Option<String> {
+        super::datetime::sortable(vr, raw, true)
+    }
+
+    /// Case folding used for case-insensitive PN matching.
+    pub fn fold(s: &str) -> String {
+        s.to_lowercase()
+    }
+}
+
 use crate::{QueryLevel, Tag, Vr};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
