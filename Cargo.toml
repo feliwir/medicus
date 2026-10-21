@@ -12,6 +12,7 @@ authors = ["Stephan Vedder"]
 [workspace.dependencies]
 medicus-core = { path = "crates/medicus-core" }
 medicus-abi = { path = "crates/medicus-abi" }
+medicus-addon-sdk = { path = "crates/medicus-addon-sdk" }
 
 anyhow = "1"
 async-trait = "0.1"
