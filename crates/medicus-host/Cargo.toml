@@ -20,6 +20,7 @@ tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
 
 [dev-dependencies]
+example-c = { path = "../../addons/example-c" }
 test-addon = { path = "../../addons/test-addon" }
 
 bytes.workspace = true

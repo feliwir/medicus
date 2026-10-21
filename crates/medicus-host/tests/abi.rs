@@ -69,7 +69,10 @@ async fn exercise_blob_store(store: &dyn BlobStore) {
         store.stat(&k).await.unwrap().unwrap().size,
         payload.len() as u64
     );
-    assert!(store.usage().await.unwrap().unwrap().used >= payload.len() as u64);
+    // `None` (no physical limit) is legitimate; if reported, usage must account for the blob.
+    if let Some(usage) = store.usage().await.unwrap() {
+        assert!(usage.used >= payload.len() as u64);
+    }
 
     let missing = store.get(&key("no/such/blob"), None).await.err().unwrap();
     assert_eq!(missing.kind, ErrorKind::NotFound);
@@ -225,4 +228,38 @@ async fn dynamic_library() {
 
     let missing = loader.load_library(&path.with_file_name("does-not-exist.so"), "x", &json!(null));
     assert!(matches!(missing, Err(LoadError::Library { .. })));
+}
+
+/// The C example addon (compiled by `addons/example-c/build.rs` with the platform C compiler)
+/// passes the same scenarios: the ABI is usable without Rust.
+#[tokio::test(flavor = "multi_thread")]
+async fn c_addon() {
+    let loader = AddonLoader::new(Handle::current());
+    let path = std::path::Path::new(example_c::LIBRARY_PATH);
+    let addon = loader
+        .load_library(path, "example-c", &json!(null))
+        .unwrap();
+    assert_eq!(addon.info.name, "example-c");
+    exercise_blob_store(store(&addon).as_ref()).await;
+
+    assert_eq!(addon.event_hooks.len(), 1);
+    let hook = addon.event_hooks[0].value.clone();
+    assert!(
+        hook.filter().kinds.is_empty(),
+        "C hook subscribes to all events"
+    );
+    let origin = Origin::Internal {
+        component: "test".into(),
+    };
+    hook.on_event(&Event::new(EventKind::StudyStable, origin.clone()))
+        .await
+        .unwrap();
+    let err = hook
+        .on_event(&Event::new(EventKind::Other("test.fail".into()), origin))
+        .await
+        .unwrap_err();
+    assert_eq!(
+        (err.kind, err.message.as_str()),
+        (ErrorKind::Unavailable, "refusing test.fail")
+    );
 }
