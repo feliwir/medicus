@@ -1,0 +1,19 @@
+[package]
+name = "storage-fs-dylib"
+description = "storage-fs as a dynamically loadable addon library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "medicus_storage_fs"
+crate-type = ["cdylib"]
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+storage-fs = { path = "../storage-fs" }
+
+[lints]
+workspace = true

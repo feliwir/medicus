@@ -1,0 +1,28 @@
+[package]
+name = "storage-fs"
+description = "medicus BlobStore on the local filesystem."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+medicus-core.workspace = true
+
+bytes.workspace = true
+fs4 = { version = "1", default-features = false, features = ["sync"] }
+futures.workspace = true
+serde.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-util = { version = "0.7", features = ["io"] }
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+medicus-testkit.workspace = true
+tempfile.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true
