@@ -62,7 +62,7 @@ fn level_values(
                 v.and_then(|v| v.trim_start_matches('+').parse::<i64>().ok())
                     .into(),
             )),
-            Storage::StudyMulti { .. } | Storage::PatientStudyCount => {}
+            Storage::StudyMulti { .. } | Storage::Count { .. } => {}
         }
     }
     if let Some(json) = extra::level_json(extras, level, &record.attributes) {
@@ -193,60 +193,42 @@ async fn locate_rows<T: Tx>(tx: &mut T, resource: &ResourceUid) -> Result<Vec<Ex
     rows.iter().map(|r| decode_location(r)).collect()
 }
 
-/// Removes one instance row, maintains counters and aggregates, and deletes parents that became
-/// empty.
-async fn remove_instance<T: Tx>(tx: &mut T, existing: &ExistingInstance, now: i64) -> Result<()> {
+/// Removes one instance row and deletes parents that became empty. Counts and aggregates are
+/// computed on read, so there is nothing else to maintain.
+async fn remove_instance<T: Tx>(tx: &mut T, existing: &ExistingInstance) -> Result<()> {
     let d = tx.dialect();
     let mut s = Stmt::new(d);
-    s.push("SELECT se.id, se.study_fk, st.patient_fk FROM instances i JOIN series se ON se.id = i.series_fk \
-            JOIN studies st ON st.id = se.study_fk WHERE i.id = ")
-        .bind(existing.id);
+    s.push(
+        "SELECT se.id, se.study_fk, st.patient_fk FROM instances i JOIN series se ON se.id = i.series_fk \
+         JOIN studies st ON st.id = se.study_fk WHERE i.id = ",
+    )
+    .bind(existing.id);
     let row = tx
         .fetch(&s, &[CellKind::Int, CellKind::Int, CellKind::Int])
         .await?
         .into_iter()
         .next()
         .ok_or_else(|| Error::not_found("instance vanished during removal"))?;
-    let (series_id, study_id, patient_id) = (
-        row[0].int().ok_or_else(|| corrupt("id"))?,
-        row[1].int().ok_or_else(|| corrupt("id"))?,
-        row[2].int().ok_or_else(|| corrupt("id"))?,
-    );
-    let size = to_i64(existing.location.size);
+    let id = |i: usize| row.get(i).and_then(Cell::int).ok_or_else(|| corrupt("id"));
+    let (series_id, study_id, patient_id) = (id(0)?, id(1)?, id(2)?);
 
     let mut s = Stmt::new(d);
     s.push("DELETE FROM instances WHERE id = ")
         .bind(existing.id);
     tx.execute(&s).await?;
-
     let mut s = Stmt::new(d);
-    s.push("UPDATE series SET num_instances = num_instances - 1, size_bytes = size_bytes - ")
-        .bind(size)
-        .push(", updated_at = ")
-        .bind(now)
-        .push(" WHERE id = ")
-        .bind(series_id);
+    s.push("DELETE FROM series WHERE id = ")
+        .bind(series_id)
+        .push(" AND NOT EXISTS (SELECT 1 FROM instances WHERE series_fk = ")
+        .bind(series_id)
+        .push(")");
     tx.execute(&s).await?;
     let mut s = Stmt::new(d);
-    s.push("DELETE FROM series WHERE num_instances <= 0 AND id = ")
-        .bind(series_id);
-    tx.execute(&s).await?;
-
-    let mut s = Stmt::new(d);
-    s.push("UPDATE studies SET num_instances = num_instances - 1, size_bytes = size_bytes - ")
-        .bind(size)
-        .push(", num_series = (SELECT COUNT(*) FROM series WHERE study_fk = ")
+    s.push("DELETE FROM studies WHERE id = ")
         .bind(study_id)
-        .push("), updated_at = ")
-        .bind(now)
-        .push(" WHERE id = ")
-        .bind(study_id);
-    tx.execute(&s).await?;
-    refresh_study_aggregates(tx, study_id).await?;
-
-    let mut s = Stmt::new(d);
-    s.push("DELETE FROM studies WHERE num_instances <= 0 AND id = ")
-        .bind(study_id);
+        .push(" AND NOT EXISTS (SELECT 1 FROM series WHERE study_fk = ")
+        .bind(study_id)
+        .push(")");
     if tx.execute(&s).await? > 0 {
         let mut s = Stmt::new(d);
         s.push("DELETE FROM patients WHERE id = ")
@@ -256,26 +238,6 @@ async fn remove_instance<T: Tx>(tx: &mut T, existing: &ExistingInstance, now: i6
             .push(")");
         tx.execute(&s).await?;
     }
-    Ok(())
-}
-
-/// Recomputes `ModalitiesInStudy` / `SOPClassesInStudy` side tables after a removal.
-async fn refresh_study_aggregates<T: Tx>(tx: &mut T, study_id: i64) -> Result<()> {
-    let d = tx.dialect();
-    let mut s = Stmt::new(d);
-    s.push("DELETE FROM study_modalities WHERE study_fk = ")
-        .bind(study_id)
-        .push(" AND modality NOT IN (SELECT modality FROM series WHERE study_fk = ")
-        .bind(study_id)
-        .push(" AND modality IS NOT NULL)");
-    tx.execute(&s).await?;
-    let mut s = Stmt::new(d);
-    s.push("DELETE FROM study_sop_classes WHERE study_fk = ")
-        .bind(study_id)
-        .push(" AND sop_class NOT IN (SELECT i.sop_class FROM instances i JOIN series se ON se.id = i.series_fk WHERE se.study_fk = ")
-        .bind(study_id)
-        .push(")");
-    tx.execute(&s).await?;
     Ok(())
 }
 
@@ -312,7 +274,6 @@ async fn apply_duplicate_policy<T: Tx>(
     tx: &mut T,
     record: &InstanceRecord,
     policy: DuplicatePolicy,
-    now: i64,
 ) -> Result<PolicyDecision> {
     let existing = locate_rows(tx, &ResourceUid::Instance(record.instance.clone()))
         .await?
@@ -326,7 +287,7 @@ async fn apply_duplicate_policy<T: Tx>(
         )),
         (Some(_), DuplicatePolicy::KeepExisting) => Ok(PolicyDecision::Keep),
         (Some(old), DuplicatePolicy::Overwrite) => {
-            remove_instance(tx, &old, now).await?;
+            remove_instance(tx, &old).await?;
             Ok(PolicyDecision::Proceed(Duplicate::Replaced {
                 previous: Box::new(old.location),
             }))
@@ -334,14 +295,14 @@ async fn apply_duplicate_policy<T: Tx>(
     }
 }
 
-/// Upserts patient, study and series (last writer wins for attribute values); returns the study
-/// and series ids.
+/// Upserts patient, study and series (last writer wins for attribute values); returns the series
+/// id.
 async fn upsert_hierarchy<T: Tx>(
     tx: &mut T,
     record: &InstanceRecord,
     extras: &[ExtraTagStatus],
     now: i64,
-) -> Result<(i64, i64)> {
+) -> Result<i64> {
     let d = tx.dialect();
     let patient_id = first_value(record, tags::PATIENT_ID, Vr::LO).unwrap_or_default();
     let issuer = first_value(record, tags::ISSUER_OF_PATIENT_ID, Vr::LO).unwrap_or_default();
@@ -406,7 +367,7 @@ async fn upsert_hierarchy<T: Tx>(
             record.series, record.study
         )));
     }
-    Ok((study_fk, series_fk))
+    Ok(series_fk)
 }
 
 async fn insert_instance<T: Tx>(
@@ -441,44 +402,6 @@ async fn insert_instance<T: Tx>(
     Ok(())
 }
 
-/// Counters and the `ModalitiesInStudy` / `SOPClassesInStudy` side tables for an added instance.
-async fn update_aggregates<T: Tx>(
-    tx: &mut T,
-    record: &InstanceRecord,
-    study_fk: i64,
-    series_fk: i64,
-) -> Result<()> {
-    let d = tx.dialect();
-    let total = to_i64(record.size);
-    let mut s = Stmt::new(d);
-    s.push("UPDATE series SET num_instances = num_instances + 1, size_bytes = size_bytes + ")
-        .bind(total)
-        .push(" WHERE id = ")
-        .bind(series_fk);
-    tx.execute(&s).await?;
-    let mut s = Stmt::new(d);
-    s.push("UPDATE studies SET num_instances = num_instances + 1, size_bytes = size_bytes + ")
-        .bind(total)
-        .push(", num_series = (SELECT COUNT(*) FROM series WHERE study_fk = ")
-        .bind(study_fk)
-        .push(") WHERE id = ")
-        .bind(study_fk);
-    tx.execute(&s).await?;
-    if let Some(modality) = first_value(record, tags::MODALITY, Vr::CS) {
-        let mut s = Stmt::new(d);
-        s.push("INSERT INTO study_modalities (study_fk, modality) VALUES ")
-            .bind_list([Cell::Int(study_fk), Cell::from(modality)])
-            .push(" ON CONFLICT DO NOTHING");
-        tx.execute(&s).await?;
-    }
-    let mut s = Stmt::new(d);
-    s.push("INSERT INTO study_sop_classes (study_fk, sop_class) VALUES ")
-        .bind_list([Cell::Int(study_fk), Cell::from(record.sop_class.as_str())])
-        .push(" ON CONFLICT DO NOTHING");
-    tx.execute(&s).await?;
-    Ok(())
-}
-
 fn to_i64(v: u64) -> i64 {
     i64::try_from(v).unwrap_or(i64::MAX)
 }
@@ -491,7 +414,7 @@ pub(crate) async fn store_instance<T: Tx>(
     extras: &[ExtraTagStatus],
 ) -> Result<StoreOutcome> {
     let now = micros(event.time);
-    let duplicate = match apply_duplicate_policy(tx, record, policy, now).await? {
+    let duplicate = match apply_duplicate_policy(tx, record, policy).await? {
         PolicyDecision::Proceed(d) => d,
         PolicyDecision::Keep => {
             return Ok(StoreOutcome {
@@ -500,9 +423,8 @@ pub(crate) async fn store_instance<T: Tx>(
             });
         }
     };
-    let (study_fk, series_fk) = upsert_hierarchy(tx, record, extras, now).await?;
+    let series_fk = upsert_hierarchy(tx, record, extras, now).await?;
     insert_instance(tx, record, extras, series_fk, now).await?;
-    update_aggregates(tx, record, study_fk, series_fk).await?;
     // The event is part of the same transaction (transactional outbox).
     let seq = append_event(tx, event).await?;
     Ok(StoreOutcome {
@@ -520,9 +442,8 @@ pub(crate) async fn delete<T: Tx>(
     if rows.is_empty() {
         return Err(Error::not_found(format!("{resource:?} does not exist")));
     }
-    let now = micros(event.time);
     for row in &rows {
-        remove_instance(tx, row, now).await?;
+        remove_instance(tx, row).await?;
     }
     let seq = append_event(tx, event).await?;
     Ok(DeleteOutcome {

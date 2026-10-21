@@ -30,9 +30,6 @@ CREATE TABLE studies (
     referring_folded TEXT,
     description      TEXT,
     institution      TEXT,
-    num_series       INTEGER NOT NULL DEFAULT 0,
-    num_instances    INTEGER NOT NULL DEFAULT 0,
-    size_bytes       INTEGER NOT NULL DEFAULT 0,
     received_at      INTEGER NOT NULL,
     updated_at       INTEGER NOT NULL,
     last_accessed_at INTEGER,
@@ -42,19 +39,6 @@ CREATE INDEX studies_patient ON studies (patient_fk);
 CREATE INDEX studies_date ON studies (study_date);
 CREATE INDEX studies_accession ON studies (accession);
 CREATE INDEX studies_received ON studies (received_at);
-
-CREATE TABLE study_modalities (
-    study_fk INTEGER NOT NULL REFERENCES studies (id) ON DELETE CASCADE,
-    modality TEXT NOT NULL,
-    PRIMARY KEY (study_fk, modality)
-);
-CREATE INDEX study_modalities_modality ON study_modalities (modality);
-
-CREATE TABLE study_sop_classes (
-    study_fk  INTEGER NOT NULL REFERENCES studies (id) ON DELETE CASCADE,
-    sop_class TEXT NOT NULL,
-    PRIMARY KEY (study_fk, sop_class)
-);
 
 CREATE TABLE series (
     id              INTEGER PRIMARY KEY,
@@ -69,13 +53,12 @@ CREATE TABLE series (
     body_part       TEXT,
     station         TEXT,
     pps_start_date  TEXT,
-    num_instances   INTEGER NOT NULL DEFAULT 0,
-    size_bytes      INTEGER NOT NULL DEFAULT 0,
     updated_at      INTEGER NOT NULL,
     extra           BLOB
 );
-CREATE INDEX series_study ON series (study_fk);
-CREATE INDEX series_modality ON series (modality);
+-- Counts and ModalitiesInStudy are computed by correlated subqueries; these indexes keep them
+-- index range scans.
+CREATE INDEX series_study ON series (study_fk, modality);
 
 CREATE TABLE instances (
     id               INTEGER PRIMARY KEY,
@@ -95,7 +78,7 @@ CREATE TABLE instances (
     received_at      INTEGER NOT NULL,
     extra            BLOB
 );
-CREATE INDEX instances_series ON instances (series_fk);
+CREATE INDEX instances_series ON instances (series_fk, sop_class);
 
 -- Operator-configured extra indexed tags. Values live in the `extra` JSON column of the level's
 -- table as {"GGGGEEEE": [match-form values]}; state is 'ready' or 'backfilling'.

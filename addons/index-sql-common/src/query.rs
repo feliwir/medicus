@@ -11,7 +11,9 @@ use medicus_core::{Error, QueryLevel, Result, Tag, Vr};
 use serde_json::{Value, json};
 
 use crate::extra;
-use crate::schema::{COLUMNS, Column, Storage, column, from_clause, id_expr};
+use crate::schema::{
+    COLUMNS, Column, Storage, column, from_clause, id_expr, is_computed, size_expr,
+};
 use crate::sql::{Cell, CellKind, Dialect, Stmt};
 
 pub(crate) struct Compiled {
@@ -23,38 +25,37 @@ pub(crate) struct Compiled {
     pub limit: Option<u32>,
 }
 
-/// Columns returned at a level: everything of this and the parent levels; the patient study
-/// count only at patient level (it is computed per row).
+/// Columns returned at a level: the stored attributes of this and the parent levels, and the
+/// computed ones (counts, aggregates) of this level only, since they cost a subquery per row.
 fn selected(level: QueryLevel) -> Vec<&'static Column> {
     COLUMNS
         .iter()
         .filter(|c| c.level <= level)
-        .filter(|c| c.storage != Storage::PatientStudyCount || level == QueryLevel::Patient)
+        .filter(|c| !is_computed(c) || c.level == level)
         .collect()
 }
 
 fn select_expr(c: &Column, dialect: Dialect) -> String {
     match c.storage {
-        Storage::StudyMulti { table } => {
+        Storage::StudyMulti { from } => {
             let agg = match dialect {
                 Dialect::Sqlite => "group_concat(x, '\\')",
                 Dialect::Postgres => "string_agg(x, '\\' ORDER BY x)",
             };
             format!(
-                "(SELECT {agg} FROM (SELECT m.{col} AS x FROM {table} m WHERE m.study_fk = st.id ORDER BY m.{col}) agg)",
+                "(SELECT {agg} FROM (SELECT DISTINCT m.{col} AS x FROM {from} AND m.{col} IS NOT NULL \
+                 AND m.{col} <> '' ORDER BY x) agg)",
                 col = c.column
             )
         }
-        Storage::PatientStudyCount => {
-            "(SELECT COUNT(*) FROM studies s2 WHERE s2.patient_fk = p.id)".to_owned()
-        }
+        Storage::Count { expr } => expr.to_owned(),
         _ => c.expr(),
     }
 }
 
 fn kind(c: &Column) -> CellKind {
     match c.storage {
-        Storage::Int | Storage::PatientStudyCount => CellKind::Int,
+        Storage::Int | Storage::Count { .. } => CellKind::Int,
         _ => CellKind::Text,
     }
 }
@@ -154,12 +155,7 @@ fn order_by(stmt: &mut Stmt, q: &Query) {
             OrderKey::LastAccessedAt => {
                 (q.level == QueryLevel::Study).then(|| "st.last_accessed_at".into())
             }
-            OrderKey::Size => match q.level {
-                QueryLevel::Study => Some("st.size_bytes".into()),
-                QueryLevel::Series => Some("se.size_bytes".into()),
-                QueryLevel::Instance => Some("i.size".into()),
-                QueryLevel::Patient => None,
-            },
+            OrderKey::Size => size_expr(q.level).map(str::to_owned),
         };
         if let Some(e) = expr {
             terms.push(format!("{e} {}", if o.descending { "DESC" } else { "ASC" }));
@@ -181,7 +177,7 @@ fn stored_value(c: &Column, raw: &str, opts: &MatchOptions) -> Option<Cell> {
         })),
         Storage::Date => sortable_lower(Vr::DA, &v).map(Cell::Text),
         Storage::Time { .. } => sortable_lower(Vr::TM, &v).map(Cell::Text),
-        Storage::Int | Storage::PatientStudyCount => v
+        Storage::Int | Storage::Count { .. } => v
             .trim()
             .trim_start_matches('+')
             .parse::<i64>()
@@ -198,22 +194,17 @@ fn match_expr(c: &Column, opts: &MatchOptions) -> String {
         }
         Storage::Time { key } => format!("{}.{key}", c.alias),
         Storage::StudyMulti { .. } => format!("m.{}", c.column),
-        Storage::PatientStudyCount => select_expr(c, Dialect::Sqlite),
+        Storage::Count { expr } => expr.to_owned(),
         _ => c.expr(),
     }
 }
 
 /// Appends a boolean SQL condition for one key.
 fn condition(stmt: &mut Stmt, c: &Column, key: &Key, opts: &MatchOptions) {
-    if let Storage::StudyMulti { table } = c.storage {
-        return multi_condition(stmt, c, table, &key.matcher, opts);
+    if let Storage::StudyMulti { from } = c.storage {
+        return multi_condition(stmt, c, from, &key.matcher, opts);
     }
-    let expr = match c.storage {
-        // The computed count needs the dialect-independent subquery.
-        Storage::PatientStudyCount => select_expr(c, stmt.dialect()),
-        _ => match_expr(c, opts),
-    };
-    scalar_condition(stmt, c, &expr, &key.matcher, opts);
+    scalar_condition(stmt, c, &match_expr(c, opts), &key.matcher, opts);
 }
 
 fn eq(stmt: &mut Stmt, c: &Column, expr: &str, raw: &str, opts: &MatchOptions) {
@@ -337,11 +328,9 @@ fn scalar_condition(stmt: &mut Stmt, c: &Column, expr: &str, m: &Matcher, opts: 
 
 /// Conditions on multi-valued study attributes become `EXISTS` subqueries: the study matches if
 /// some value matches (all values for `AllOf`).
-fn multi_condition(stmt: &mut Stmt, c: &Column, table: &str, m: &Matcher, opts: &MatchOptions) {
+fn multi_condition(stmt: &mut Stmt, c: &Column, from: &str, m: &Matcher, opts: &MatchOptions) {
     let exists = |stmt: &mut Stmt, f: &mut dyn FnMut(&mut Stmt)| {
-        stmt.push(&format!(
-            "EXISTS (SELECT 1 FROM {table} m WHERE m.study_fk = st.id AND "
-        ));
+        stmt.push(&format!("EXISTS (SELECT 1 FROM {from} AND "));
         f(stmt);
         stmt.push(")");
     };
@@ -349,7 +338,7 @@ fn multi_condition(stmt: &mut Stmt, c: &Column, table: &str, m: &Matcher, opts: 
     match m {
         Matcher::Empty => {
             stmt.push(&format!(
-                "NOT EXISTS (SELECT 1 FROM {table} m WHERE m.study_fk = st.id)"
+                "NOT EXISTS (SELECT 1 FROM {from} AND {expr} IS NOT NULL AND {expr} <> '')"
             ));
         }
         Matcher::AllOf { values } => join_conditions(stmt, values, " AND ", |s, v| {
@@ -432,7 +421,7 @@ mod tests {
             sql.contains("st.study_date >= $2 AND st.study_date <= $3"),
             "{sql}"
         );
-        assert!(sql.contains("EXISTS (SELECT 1 FROM study_modalities m WHERE m.study_fk = st.id AND (m.modality = $4 OR m.modality = $5))"), "{sql}");
+        assert!(sql.contains("EXISTS (SELECT 1 FROM series m WHERE m.study_fk = st.id AND (m.modality = $4 OR m.modality = $5))"), "{sql}");
         assert_eq!(c.stmt.args[0], Cell::from("doe%"));
         assert!(c.unfiltered.is_empty());
     }

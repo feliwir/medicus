@@ -18,10 +18,11 @@ pub enum Storage {
     Time { key: &'static str },
     /// IS stored as an integer.
     Int,
-    /// A multi-valued study attribute kept in a side table `(study_fk, <column>)`.
-    StudyMulti { table: &'static str },
-    /// `NumberOfPatientRelatedStudies`, computed on demand.
-    PatientStudyCount,
+    /// A multi-valued study attribute derived from lower levels: the distinct values of
+    /// `m.<column>` over `from`, a `FROM ... WHERE` fragment correlated with `st` (alias `m`).
+    StudyMulti { from: &'static str },
+    /// An integer computed on demand by a correlated subquery (`NumberOf...Related...`).
+    Count { expr: &'static str },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,7 +58,7 @@ macro_rules! columns {
     };
 }
 
-use Storage::{Date, Int, PatientStudyCount, PersonName, StudyMulti, Text, Time};
+use Storage::{Count, Date, Int, PersonName, StudyMulti, Text, Time};
 
 columns! {
     PATIENT_NAME: Patient "p"."patient_name" PersonName { folded: "patient_name_folded" };
@@ -65,7 +66,9 @@ columns! {
     ISSUER_OF_PATIENT_ID: Patient "p"."issuer" Text;
     PATIENT_BIRTH_DATE: Patient "p"."birth_date" Date;
     PATIENT_SEX: Patient "p"."sex" Text;
-    NUMBER_OF_PATIENT_RELATED_STUDIES: Patient "p"."id" PatientStudyCount;
+    NUMBER_OF_PATIENT_RELATED_STUDIES: Patient "p"."id" Count {
+        expr: "(SELECT COUNT(*) FROM studies c WHERE c.patient_fk = p.id)"
+    };
 
     STUDY_INSTANCE_UID: Study "st"."study_uid" Text;
     STUDY_DATE: Study "st"."study_date" Date;
@@ -75,10 +78,16 @@ columns! {
     REFERRING_PHYSICIAN_NAME: Study "st"."referring" PersonName { folded: "referring_folded" };
     STUDY_DESCRIPTION: Study "st"."description" Text;
     INSTITUTION_NAME: Study "st"."institution" Text;
-    MODALITIES_IN_STUDY: Study "st"."modality" StudyMulti { table: "study_modalities" };
-    SOP_CLASSES_IN_STUDY: Study "st"."sop_class" StudyMulti { table: "study_sop_classes" };
-    NUMBER_OF_STUDY_RELATED_SERIES: Study "st"."num_series" Int;
-    NUMBER_OF_STUDY_RELATED_INSTANCES: Study "st"."num_instances" Int;
+    MODALITIES_IN_STUDY: Study "m"."modality" StudyMulti { from: "series m WHERE m.study_fk = st.id" };
+    SOP_CLASSES_IN_STUDY: Study "m"."sop_class" StudyMulti {
+        from: "instances m JOIN series ms ON ms.id = m.series_fk WHERE ms.study_fk = st.id"
+    };
+    NUMBER_OF_STUDY_RELATED_SERIES: Study "st"."id" Count {
+        expr: "(SELECT COUNT(*) FROM series c WHERE c.study_fk = st.id)"
+    };
+    NUMBER_OF_STUDY_RELATED_INSTANCES: Study "st"."id" Count {
+        expr: "(SELECT COUNT(*) FROM instances c JOIN series cs ON cs.id = c.series_fk WHERE cs.study_fk = st.id)"
+    };
 
     SERIES_INSTANCE_UID: Series "se"."series_uid" Text;
     MODALITY: Series "se"."modality" Text;
@@ -89,7 +98,9 @@ columns! {
     BODY_PART_EXAMINED: Series "se"."body_part" Text;
     STATION_NAME: Series "se"."station" Text;
     PERFORMED_PROCEDURE_STEP_START_DATE: Series "se"."pps_start_date" Date;
-    NUMBER_OF_SERIES_RELATED_INSTANCES: Series "se"."num_instances" Int;
+    NUMBER_OF_SERIES_RELATED_INSTANCES: Series "se"."id" Count {
+        expr: "(SELECT COUNT(*) FROM instances c WHERE c.series_fk = se.id)"
+    };
 
     SOP_INSTANCE_UID: Instance "i"."sop_uid" Text;
     SOP_CLASS_UID: Instance "i"."sop_class" Text;
@@ -103,15 +114,24 @@ pub fn column(tag: Tag) -> Option<&'static Column> {
     COLUMNS.iter().find(|c| c.tag == tag)
 }
 
-/// Attributes maintained by the index itself (counts, aggregates); never taken from instances.
+/// Attributes computed by the index (counts, aggregates); never taken from instances.
 pub fn is_computed(c: &Column) -> bool {
-    matches!(c.storage, StudyMulti { .. } | PatientStudyCount)
-        || matches!(
-            c.tag,
-            tags::NUMBER_OF_STUDY_RELATED_SERIES
-                | tags::NUMBER_OF_STUDY_RELATED_INSTANCES
-                | tags::NUMBER_OF_SERIES_RELATED_INSTANCES
-        )
+    matches!(c.storage, StudyMulti { .. } | Count { .. })
+}
+
+/// Correlated subquery for the total stored size of the level's row (for ordering by size).
+pub fn size_expr(level: QueryLevel) -> Option<&'static str> {
+    match level {
+        QueryLevel::Patient => None,
+        QueryLevel::Study => Some(
+            "(SELECT COALESCE(SUM(c.size), 0) FROM instances c JOIN series cs ON cs.id = c.series_fk \
+             WHERE cs.study_fk = st.id)",
+        ),
+        QueryLevel::Series => {
+            Some("(SELECT COALESCE(SUM(c.size), 0) FROM instances c WHERE c.series_fk = se.id)")
+        }
+        QueryLevel::Instance => Some("i.size"),
+    }
 }
 
 /// `FROM` clause for a query level, joining all parent levels.
