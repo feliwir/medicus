@@ -4,14 +4,14 @@ use std::sync::atomic::Ordering;
 
 use medicus_abi::bridge::{abi_compatible, abi_version_string, target};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MdAbiVersionFn, MdAddonInfo,
-    MdBlobStoreVtable, MdEventHookVtable, MdInitFn,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MdAbiVersionFn,
+    MdAddonInfo, MdBlobStoreVtable, MdEventHookVtable, MdIndexStoreVtable, MdInitFn,
 };
 use medicus_abi::{SYMBOL_ABI_VERSION, SYMBOL_INIT, StaticAddon};
-use medicus_core::capability::{BlobStore, EventHook};
+use medicus_core::capability::{BlobStore, EventHook, IndexStore};
 use tokio::runtime::Handle;
 
-use crate::adapters::{FfiBlobStore, FfiEventHook};
+use crate::adapters::{FfiBlobStore, FfiEventHook, FfiIndexStore};
 use crate::host_api::{RawRegistration, new_host_api};
 
 #[derive(Debug, thiserror::Error)]
@@ -60,6 +60,7 @@ pub struct LoadedAddon {
     pub info: AddonInfo,
     pub blob_stores: Vec<Named<Arc<dyn BlobStore>>>,
     pub event_hooks: Vec<Named<Arc<dyn EventHook>>>,
+    pub index_stores: Vec<Named<Arc<dyn IndexStore>>>,
 }
 
 impl std::fmt::Debug for LoadedAddon {
@@ -71,6 +72,7 @@ impl std::fmt::Debug for LoadedAddon {
             .field("info", &self.info)
             .field("blob_stores", &names(&self.blob_stores))
             .field("event_hooks", &names(&self.event_hooks))
+            .field("index_stores", &names(&self.index_stores))
             .finish()
     }
 }
@@ -164,6 +166,7 @@ impl AddonLoader {
             info,
             blob_stores: Vec::new(),
             event_hooks: Vec::new(),
+            index_stores: Vec::new(),
         };
         for reg in registrations {
             self.adapt(&mut loaded, reg);
@@ -219,6 +222,23 @@ impl AddonLoader {
                     value: Arc::new(hook),
                 });
             }
+            MD_CAP_INDEX_STORE => {
+                // SAFETY: as above, for MD_CAP_INDEX_STORE.
+                let vtable = unsafe { &*reg.vtable.cast::<MdIndexStoreVtable>() };
+                if vtable.size < size_of::<MdIndexStoreVtable>() {
+                    tracing::error!(%addon, name = %reg.name, "index store vtable too small; ignored");
+                    return;
+                }
+                let index = FfiIndexStore {
+                    addon,
+                    vtable,
+                    instance: reg.instance,
+                };
+                loaded.index_stores.push(Named {
+                    name: reg.name,
+                    value: Arc::new(index),
+                });
+            }
             // Unknown kinds were refused at registration time.
             _ => {}
         }
@@ -235,6 +255,7 @@ impl AddonLoader {
             info,
             blob_stores: Vec::new(),
             event_hooks: Vec::new(),
+            index_stores: Vec::new(),
         };
         for reg in registrations {
             self.adapt(&mut tmp, reg);

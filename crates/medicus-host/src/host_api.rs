@@ -5,9 +5,9 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_INVALID_ARGUMENT, MD_LOG_DEBUG,
-    MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN, MD_OK, MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer,
-    MdHostApi, MdStatus, MdStr,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_INVALID_ARGUMENT,
+    MD_LOG_DEBUG, MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN, MD_OK, MD_UNAVAILABLE, MD_UNSUPPORTED,
+    MdBuffer, MdHostApi, MdStatus, MdStr,
 };
 
 /// A capability as registered by the addon, before it is adapted.
@@ -105,7 +105,10 @@ unsafe extern "C" fn host_register_capability(
         tracing::warn!(addon = %ctx.addon, "capability registered after initialization; refused");
         return MD_UNAVAILABLE;
     }
-    if !matches!(kind, MD_CAP_BLOB_STORE | MD_CAP_EVENT_HOOK) {
+    if !matches!(
+        kind,
+        MD_CAP_BLOB_STORE | MD_CAP_EVENT_HOOK | MD_CAP_INDEX_STORE
+    ) {
         tracing::warn!(addon = %ctx.addon, kind, "unsupported capability kind; refused");
         return MD_UNSUPPORTED;
     }

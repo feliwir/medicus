@@ -1,5 +1,6 @@
 //! C vtables → core capability traits.
 
+use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::ops::Range;
 
@@ -7,12 +8,20 @@ use async_trait::async_trait;
 use medicus_abi::bridge::{
     Completion, OwnedBuffer, StreamCompletion, completion, export_stream, stream_completion,
 };
-use medicus_abi::ffi::{MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdRange, MdStr};
+use medicus_abi::ffi::{
+    MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange, MdStr,
+};
 use medicus_core::BlobKey;
+use medicus_core::capability::IndexStore;
+use medicus_core::capability::index::{
+    DeleteOutcome, DuplicatePolicy, IndexRequest, InstanceLocation, InstanceRecord, QueryResult,
+    ResourceUid, StoreOutcome,
+};
 use medicus_core::capability::{
     BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, StorageUsage,
 };
 use medicus_core::event::Event;
+use medicus_core::query::Query;
 use medicus_core::{Error, Result};
 use serde::de::DeserializeOwned;
 use tokio::runtime::Handle;
@@ -193,6 +202,126 @@ impl EventHook for FfiEventHook {
 impl Drop for FfiEventHook {
     fn drop(&mut self) {
         tracing::debug!(addon = %self.addon, "destroying event hook");
+        // SAFETY: as for `FfiBlobStore`.
+        unsafe { (self.vtable.destroy)(self.instance) };
+    }
+}
+
+/// An `IndexStore` implemented by an addon (JSON request per call).
+pub(crate) struct FfiIndexStore {
+    pub addon: String,
+    pub vtable: &'static MdIndexStoreVtable,
+    pub instance: *mut c_void,
+}
+
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Send for FfiIndexStore {}
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Sync for FfiIndexStore {}
+
+impl FfiIndexStore {
+    fn start(&self, request: &IndexRequest) -> Result<Completion> {
+        let json = serde_json::to_vec(request).map_err(|e| Error::internal(e.to_string()))?;
+        let (done, fut) = completion();
+        // SAFETY: live instance; `json` outlives the call.
+        unsafe {
+            (self.vtable.call)(
+                self.instance,
+                MdStr::from_bytes(&json),
+                MdCancel::none(),
+                done,
+            );
+        };
+        Ok(fut)
+    }
+
+    async fn call<T: DeserializeOwned>(&self, request: IndexRequest) -> Result<T> {
+        let fut = self.start(&request)?;
+        drop(request);
+        from_json(&fut.await?)
+    }
+}
+
+#[async_trait]
+impl IndexStore for FfiIndexStore {
+    async fn store_instance(
+        &self,
+        record: &InstanceRecord,
+        policy: DuplicatePolicy,
+        event: &Event,
+    ) -> Result<StoreOutcome> {
+        self.call(IndexRequest::StoreInstance {
+            record: Box::new(record.clone()),
+            policy,
+            event: Box::new(event.clone()),
+        })
+        .await
+    }
+
+    async fn query(&self, query: &Query) -> Result<QueryResult> {
+        self.call(IndexRequest::Query {
+            query: query.clone(),
+        })
+        .await
+    }
+
+    async fn locate(&self, resource: &ResourceUid) -> Result<Vec<InstanceLocation>> {
+        self.call(IndexRequest::Locate {
+            resource: resource.clone(),
+        })
+        .await
+    }
+
+    async fn delete(&self, resource: &ResourceUid, event: &Event) -> Result<DeleteOutcome> {
+        self.call(IndexRequest::Delete {
+            resource: resource.clone(),
+            event: event.clone(),
+        })
+        .await
+    }
+
+    async fn append_event(&self, event: &Event) -> Result<u64> {
+        self.call(IndexRequest::AppendEvent {
+            event: event.clone(),
+        })
+        .await
+    }
+
+    async fn events_after(&self, after: u64, limit: u32) -> Result<Vec<Event>> {
+        self.call(IndexRequest::EventsAfter { after, limit }).await
+    }
+
+    async fn last_event_seq(&self) -> Result<u64> {
+        self.call(IndexRequest::LastEventSeq).await
+    }
+
+    async fn cursor(&self, subscriber: &str) -> Result<Option<u64>> {
+        self.call(IndexRequest::Cursor {
+            subscriber: subscriber.to_owned(),
+        })
+        .await
+    }
+
+    async fn set_cursor(&self, subscriber: &str, seq: u64) -> Result<()> {
+        self.call(IndexRequest::SetCursor {
+            subscriber: subscriber.to_owned(),
+            seq,
+        })
+        .await
+    }
+
+    async fn prune_events(&self, up_to: u64) -> Result<u64> {
+        self.call(IndexRequest::PruneEvents { up_to }).await
+    }
+
+    async fn stored_bytes(&self) -> Result<BTreeMap<String, u64>> {
+        self.call(IndexRequest::StoredBytes).await
+    }
+}
+
+impl Drop for FfiIndexStore {
+    fn drop(&mut self) {
+        tracing::debug!(addon = %self.addon, "destroying index store");
         // SAFETY: as for `FfiBlobStore`.
         unsafe { (self.vtable.destroy)(self.instance) };
     }
