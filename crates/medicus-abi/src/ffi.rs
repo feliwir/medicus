@@ -20,7 +20,7 @@ use core::ffi::c_void;
 /// Major ABI version. While it is 0, every minor change is breaking.
 pub const MD_ABI_MAJOR: u32 = 0;
 /// Minor ABI version.
-pub const MD_ABI_MINOR: u32 = 1;
+pub const MD_ABI_MINOR: u32 = 2;
 /// `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
 pub const MD_ABI_VERSION: u32 = (MD_ABI_MAJOR << 16) | MD_ABI_MINOR;
 
@@ -42,6 +42,7 @@ pub const MD_PANICKED: MdStatus = 10;
 /// Capability kinds for `MdHostApi::register_capability`.
 pub const MD_CAP_BLOB_STORE: u32 = 1;
 pub const MD_CAP_EVENT_HOOK: u32 = 2;
+pub const MD_CAP_INDEX_STORE: u32 = 3;
 
 /// Log levels for `MdHostApi::log`.
 pub const MD_LOG_ERROR: u32 = 1;
@@ -212,6 +213,23 @@ pub struct MdEventHookVtable {
     pub on_event: unsafe extern "C" fn(
         instance: *mut c_void,
         event: MdStr,
+        cancel: MdCancel,
+        done: MdCompletion,
+    ),
+    pub destroy: unsafe extern "C" fn(instance: *mut c_void),
+}
+
+/// `MD_CAP_INDEX_STORE`. A single JSON-RPC style entry point: `request` is a JSON object with a
+/// `"method"` field and the method's arguments (see `medicus_core::capability::index::IndexRequest`);
+/// the result is the method's JSON return value. Unknown methods must fail with `MD_UNSUPPORTED`.
+/// New index methods therefore never change this vtable.
+#[repr(C)]
+#[derive(Debug)]
+pub struct MdIndexStoreVtable {
+    pub size: usize,
+    pub call: unsafe extern "C" fn(
+        instance: *mut c_void,
+        request: MdStr,
         cancel: MdCancel,
         done: MdCompletion,
     ),

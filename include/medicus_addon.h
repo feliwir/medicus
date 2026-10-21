@@ -19,7 +19,7 @@
 /**
  * Minor ABI version.
  */
-#define MD_ABI_MINOR 1
+#define MD_ABI_MINOR 2
 
 /**
  * `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
@@ -32,6 +32,8 @@
 #define MD_CAP_BLOB_STORE 1
 
 #define MD_CAP_EVENT_HOOK 2
+
+#define MD_CAP_INDEX_STORE 3
 
 /**
  * Log levels for `MdHostApi::log`.
@@ -224,6 +226,21 @@ typedef struct MdEventHookVtable {
                    struct MdCompletion done);
   void (*destroy)(void *instance);
 } MdEventHookVtable;
+
+/**
+ * `MD_CAP_INDEX_STORE`. A single JSON-RPC style entry point: `request` is a JSON object with a
+ * `"method"` field and the method's arguments (see `medicus_core::capability::index::IndexRequest`);
+ * the result is the method's JSON return value. Unknown methods must fail with `MD_UNSUPPORTED`.
+ * New index methods therefore never change this vtable.
+ */
+typedef struct MdIndexStoreVtable {
+  size_t size;
+  void (*call)(void *instance,
+               struct MdStr request,
+               struct MdCancel cancel,
+               struct MdCompletion done);
+  void (*destroy)(void *instance);
+} MdIndexStoreVtable;
 
 /**
  * Signature of the exported `medicus_addon_abi_version` symbol.
