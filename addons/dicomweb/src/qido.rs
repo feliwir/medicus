@@ -240,6 +240,15 @@ fn first_string(row: &DicomJsonObject, tag: Tag) -> Option<String> {
         .map(str::to_owned)
 }
 
+/// Whether a DICOM JSON attribute carries a value.
+fn has_value(attribute: &Value) -> bool {
+    ["Value", "InlineBinary", "BulkDataURI"].iter().any(|k| {
+        attribute
+            .get(k)
+            .is_some_and(|v| !v.as_array().is_some_and(Vec::is_empty))
+    })
+}
+
 /// The Retrieve URL of a result row.
 pub(crate) fn retrieve_url(root: &str, level: QueryLevel, row: &DicomJsonObject) -> Option<String> {
     let study = first_string(row, tags::STUDY_INSTANCE_UID)?;
@@ -270,7 +279,10 @@ async fn search(
             let mut out = DicomJsonObject::new();
             for tag in &returned {
                 let key = tag.json_key();
-                if let Some(v) = row.get(&key) {
+                // Attributes without a value are left out rather than sent as `{"vr": ..}`: both
+                // are valid DICOM JSON, but viewers (OHIF) expect `Value` wherever an attribute
+                // is present.
+                if let Some(v) = row.get(&key).filter(|v| has_value(v)) {
                     out.insert(key, v.clone());
                 }
             }
@@ -298,4 +310,17 @@ async fn search(
         );
     }
     Ok(response)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_attributes_are_recognized() {
+        assert!(!has_value(&json!({ "vr": "CS" })));
+        assert!(!has_value(&json!({ "vr": "CS", "Value": [] })));
+        assert!(has_value(&json!({ "vr": "CS", "Value": ["CT"] })));
+        assert!(has_value(&json!({ "vr": "OB", "InlineBinary": "AAE=" })));
+    }
 }

@@ -170,12 +170,7 @@ impl Archive {
         instance: &SopInstanceUid,
     ) -> Result<DicomJsonObject> {
         let header = self.header(partition, instance).await?;
-        let dataset: &dicom_object::InMemDicomObject = &header;
-        match dicom_json::to_value(dataset) {
-            Ok(serde_json::Value::Object(map)) => Ok(map),
-            Ok(_) => Err(Error::internal("metadata is not a JSON object")),
-            Err(e) => Err(Error::internal(format!("cannot convert metadata: {e}"))),
-        }
+        parse::dataset_to_json(&header)
     }
 
     /// The parsed stored header of `instance`.
