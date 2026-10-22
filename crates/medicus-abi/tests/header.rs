@@ -20,6 +20,7 @@ const TYPES: &[&str] = &[
     "MdBlobStoreVtable",
     "MdEventHookVtable",
     "MdIndexStoreVtable",
+    "MdServiceVtable",
     "MdAbiVersionFn",
     "MdInitFn",
     "MdStatus",

@@ -25,11 +25,13 @@
 #![allow(unsafe_code)]
 
 mod exports;
+mod host;
 mod logging;
 mod registrar;
 mod runtime;
 
 pub use async_trait::async_trait;
+pub use host::Host;
 pub use medicus_abi as abi;
 pub use medicus_core;
 pub use registrar::Registrar;

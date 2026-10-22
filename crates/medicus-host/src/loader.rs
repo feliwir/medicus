@@ -4,15 +4,16 @@ use std::sync::atomic::Ordering;
 
 use medicus_abi::bridge::{abi_compatible, abi_version_string, target};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MdAbiVersionFn,
-    MdAddonInfo, MdBlobStoreVtable, MdEventHookVtable, MdIndexStoreVtable, MdInitFn,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_SERVICE,
+    MdAbiVersionFn, MdAddonInfo, MdBlobStoreVtable, MdEventHookVtable, MdIndexStoreVtable,
+    MdInitFn, MdServiceVtable,
 };
 use medicus_abi::{SYMBOL_ABI_VERSION, SYMBOL_INIT, StaticAddon};
-use medicus_core::capability::{BlobStore, EventHook, IndexStore};
+use medicus_core::capability::{BlobStore, EventHook, HostServices, IndexStore, Service};
 use tokio::runtime::Handle;
 
-use crate::adapters::{FfiBlobStore, FfiEventHook, FfiIndexStore};
-use crate::host_api::{RawRegistration, new_host_api};
+use crate::adapters::{FfiBlobStore, FfiEventHook, FfiIndexStore, FfiService};
+use crate::host_api::{RawRegistration, ServicesSlot, new_host_api};
 
 #[derive(Debug, thiserror::Error)]
 pub enum LoadError {
@@ -61,6 +62,7 @@ pub struct LoadedAddon {
     pub blob_stores: Vec<Named<Arc<dyn BlobStore>>>,
     pub event_hooks: Vec<Named<Arc<dyn EventHook>>>,
     pub index_stores: Vec<Named<Arc<dyn IndexStore>>>,
+    pub services: Vec<Named<Arc<dyn Service>>>,
 }
 
 impl std::fmt::Debug for LoadedAddon {
@@ -73,19 +75,38 @@ impl std::fmt::Debug for LoadedAddon {
             .field("blob_stores", &names(&self.blob_stores))
             .field("event_hooks", &names(&self.event_hooks))
             .field("index_stores", &names(&self.index_stores))
+            .field("services", &names(&self.services))
             .finish()
     }
 }
 
 /// Loads addons. Streams the host hands to addons are served on `rt`.
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct AddonLoader {
     rt: Handle,
+    services: ServicesSlot,
+}
+
+impl std::fmt::Debug for AddonLoader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AddonLoader")
+            .field("services_bound", &self.services.get().is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl AddonLoader {
     pub fn new(rt: Handle) -> Self {
-        Self { rt }
+        Self {
+            rt,
+            services: ServicesSlot::default(),
+        }
+    }
+
+    /// Binds the host services (once the archive exists). Until then, addon calls to them fail
+    /// with `Unavailable`. Returns `false` if services were already bound.
+    pub fn bind_services(&self, services: Arc<dyn HostServices>) -> bool {
+        self.services.set(services).is_ok()
     }
 
     /// Loads an addon from a shared library.
@@ -140,7 +161,7 @@ impl AddonLoader {
                 expected: abi_version_string(MD_ABI_VERSION),
             });
         }
-        let (ctx, api) = new_host_api(name, config);
+        let (ctx, api) = new_host_api(name, config, self.services.clone(), self.rt.clone());
         // SAFETY: `api` is valid for the rest of the process.
         let info_ptr = unsafe { (entry.init)(api) };
         ctx.sealed.store(true, Ordering::Release);
@@ -167,6 +188,7 @@ impl AddonLoader {
             blob_stores: Vec::new(),
             event_hooks: Vec::new(),
             index_stores: Vec::new(),
+            services: Vec::new(),
         };
         for reg in registrations {
             self.adapt(&mut loaded, reg);
@@ -239,6 +261,23 @@ impl AddonLoader {
                     value: Arc::new(index),
                 });
             }
+            MD_CAP_SERVICE => {
+                // SAFETY: as above, for MD_CAP_SERVICE.
+                let vtable = unsafe { &*reg.vtable.cast::<MdServiceVtable>() };
+                if vtable.size < size_of::<MdServiceVtable>() {
+                    tracing::error!(%addon, name = %reg.name, "service vtable too small; ignored");
+                    return;
+                }
+                let service = FfiService {
+                    addon,
+                    vtable,
+                    instance: reg.instance,
+                };
+                loaded.services.push(Named {
+                    name: reg.name,
+                    value: Arc::new(service),
+                });
+            }
             // Unknown kinds were refused at registration time.
             _ => {}
         }
@@ -256,6 +295,7 @@ impl AddonLoader {
             blob_stores: Vec::new(),
             event_hooks: Vec::new(),
             index_stores: Vec::new(),
+            services: Vec::new(),
         };
         for reg in registrations {
             self.adapt(&mut tmp, reg);

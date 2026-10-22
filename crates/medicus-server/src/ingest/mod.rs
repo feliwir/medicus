@@ -18,14 +18,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
 use medicus_core::blob::BlobKind;
-use medicus_core::capability::ByteStream;
 use medicus_core::capability::index::{BlobRef, Duplicate, InstanceRecord};
+use medicus_core::capability::{ByteStream, Ingested};
 use medicus_core::event::{Event, EventKind, Origin, ResourceRef};
-use medicus_core::uid::{
-    SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid, TransferSyntaxUid,
-};
 use medicus_core::{BlobKey, Error, ErrorKind, Result};
-use serde::Serialize;
 
 use crate::archive::Archive;
 use parse::ParsedHeader;
@@ -33,21 +29,6 @@ use parse::ParsedHeader;
 /// The first parse attempt is made after this many bytes (or the end of the stream); each
 /// further attempt waits for twice as many, so the total parsing work stays linear.
 const FIRST_ATTEMPT: usize = 16 * 1024;
-
-/// The result of ingesting one instance.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Stored {
-    pub study: StudyInstanceUid,
-    pub series: SeriesInstanceUid,
-    pub instance: SopInstanceUid,
-    pub sop_class: SopClassUid,
-    pub transfer_syntax: TransferSyntaxUid,
-    pub size: u64,
-    /// Sequence number of the `instance.stored` event; `None` if an existing instance was kept.
-    pub seq: Option<u64>,
-    #[serde(flatten)]
-    pub duplicate: Duplicate,
-}
 
 impl Archive {
     /// Reads the stream until dicom-rs has parsed the complete header. Returns the buffered
@@ -88,7 +69,7 @@ impl Archive {
     }
 
     /// Ingests one DICOM Part 10 file.
-    pub async fn ingest(&self, mut data: ByteStream, origin: Origin) -> Result<Stored> {
+    pub async fn ingest(&self, mut data: ByteStream, origin: Origin) -> Result<Ingested> {
         self.ensure_capacity()?;
         let (prefix, parsed) = self.read_header(&mut data).await?;
 
@@ -160,7 +141,7 @@ impl Archive {
             self.events_committed(seq);
         }
         tracing::debug!(instance = %record.instance, size = record.size, seq = ?outcome.seq, "instance stored");
-        Ok(Stored {
+        Ok(Ingested {
             study: record.study,
             series: record.series,
             instance: record.instance,
@@ -180,6 +161,7 @@ mod tests {
     use dicom_dictionary_std::tags;
     use medicus_core::capability::index::ResourceUid;
     use medicus_core::query::{Key, MatchOptions, Query};
+    use medicus_core::uid::StudyInstanceUid;
     use medicus_core::{QueryLevel, VR};
     use medicus_testkit::dicom::InstanceBuilder;
     use medicus_testkit::{read_all, stream};

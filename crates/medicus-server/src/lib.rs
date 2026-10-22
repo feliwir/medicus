@@ -20,7 +20,7 @@ use tokio_util::sync::CancellationToken;
 pub use archive::Archive;
 pub use config::{Config, LogConfig, LogFormat};
 pub use import::ImportReport;
-pub use ingest::Stored;
+pub use medicus_core::capability::Ingested;
 
 /// A running archive: loaded addons and the wired archive service.
 #[derive(Debug)]
@@ -35,6 +35,9 @@ impl Node {
     pub async fn open(cfg: Config) -> anyhow::Result<Self> {
         let caps = addons::load(&cfg, &tokio::runtime::Handle::current())?;
         let archive = Arc::new(Archive::new(&caps, &cfg.archive).await?);
+        if let Some(loader) = &caps.loader {
+            loader.bind_services(archive.clone());
+        }
         tracing::info!(?archive, "archive ready");
         Ok(Self { archive, caps, cfg })
     }
@@ -47,6 +50,7 @@ impl Node {
         let stop = CancellationToken::new();
         let mut deliveries = events::spawn(&self.archive, self.caps.event_hooks.clone(), &stop);
         let capacity = tokio::spawn(capacity::monitor(self.archive.clone(), stop.clone()));
+        self.start_services().await?;
 
         let state = api::AppState {
             archive: self.archive.clone(),
@@ -69,10 +73,33 @@ impl Node {
             .context("HTTP server")?;
 
         tracing::info!("shutting down");
+        self.stop_services().await;
         stop.cancel();
         while deliveries.join_next().await.is_some() {}
         let _ = capacity.await;
         Ok(())
+    }
+
+    /// Starts the addons' background services (e.g. the DIMSE listener).
+    pub async fn start_services(&self) -> anyhow::Result<()> {
+        for (name, service) in &self.caps.services {
+            service
+                .start()
+                .await
+                .with_context(|| format!("starting service {name}"))?;
+            tracing::info!(service = %name, "service started");
+        }
+        Ok(())
+    }
+
+    /// Stops the addons' background services, in reverse order.
+    pub async fn stop_services(&self) {
+        for (name, service) in self.caps.services.iter().rev() {
+            match service.stop().await {
+                Ok(()) => tracing::info!(service = %name, "service stopped"),
+                Err(e) => tracing::warn!(service = %name, error = %e, "stopping service failed"),
+            }
+        }
     }
 
     /// Imports the DICOM files below `path`, `concurrency` at a time.

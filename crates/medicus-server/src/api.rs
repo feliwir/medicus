@@ -121,7 +121,7 @@ async fn upload(
     State(s): State<AppState>,
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
     body: Body,
-) -> ApiResult<(StatusCode, Json<crate::ingest::Stored>)> {
+) -> ApiResult<(StatusCode, Json<medicus_core::capability::Ingested>)> {
     let data = body.into_data_stream().map_err(|e| {
         Error::new(
             ErrorKind::InvalidArgument,

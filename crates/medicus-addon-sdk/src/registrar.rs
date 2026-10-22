@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use medicus_abi::bridge::{OwnedBuffer, target};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_OK, MdAddonInfo,
-    MdHostApi, MdStr,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_SERVICE,
+    MD_OK, MdAddonInfo, MdHostApi, MdStr,
 };
 use medicus_core::Error;
-use medicus_core::capability::{BlobStore, EventHook, IndexStore};
+use medicus_core::capability::{BlobStore, EventHook, IndexStore, Service};
 use serde::de::DeserializeOwned;
 
 use crate::{exports, logging};
@@ -82,6 +82,22 @@ impl Registrar {
             vtable.cast(),
             instance,
             exports::destroy_event_hook,
+        )
+    }
+
+    /// A handle to the host's services (e.g. ingest), to keep in the addon's capabilities.
+    pub fn host(&self) -> crate::Host {
+        crate::Host(self.host)
+    }
+
+    pub fn register_service(&mut self, name: &str, service: impl Service) -> Result<(), Error> {
+        let (vtable, instance) = exports::service(Arc::new(service));
+        self.register(
+            MD_CAP_SERVICE,
+            name,
+            vtable.cast(),
+            instance,
+            exports::destroy_service,
         )
     }
 

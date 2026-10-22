@@ -19,7 +19,7 @@
 /**
  * Minor ABI version.
  */
-#define MD_ABI_MINOR 2
+#define MD_ABI_MINOR 3
 
 /**
  * `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
@@ -34,6 +34,8 @@
 #define MD_CAP_EVENT_HOOK 2
 
 #define MD_CAP_INDEX_STORE 3
+
+#define MD_CAP_SERVICE 4
 
 /**
  * Log levels for `MdHostApi::log`.
@@ -145,6 +147,17 @@ typedef struct MdHostApi {
                                   struct MdStr name,
                                   const void *vtable,
                                   void *instance);
+  /**
+   * Ingests a DICOM Part 10 file through the core's ingest pipeline. Takes ownership of
+   * `data`; `origin` is the JSON event origin (e.g. `{"type": "dimse", ...}`). Result: the
+   * JSON ingest outcome (`medicus_core::capability::host::Ingested`). Fails with
+   * `MD_UNAVAILABLE` until the archive is ready (services are started only after that).
+   */
+  void (*ingest)(void *ctx,
+                 struct MdReadStream data,
+                 struct MdStr origin,
+                 struct MdCancel cancel,
+                 struct MdCompletion done);
 } MdHostApi;
 
 /**
@@ -241,6 +254,17 @@ typedef struct MdIndexStoreVtable {
                struct MdCompletion done);
   void (*destroy)(void *instance);
 } MdIndexStoreVtable;
+
+/**
+ * `MD_CAP_SERVICE`: a background service (e.g. a network listener) the host starts once the
+ * archive is ready and stops at shutdown. Results are empty.
+ */
+typedef struct MdServiceVtable {
+  size_t size;
+  void (*start)(void *instance, struct MdCompletion done);
+  void (*stop)(void *instance, struct MdCompletion done);
+  void (*destroy)(void *instance);
+} MdServiceVtable;
 
 /**
  * Signature of the exported `medicus_addon_abi_version` symbol.

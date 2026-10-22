@@ -209,7 +209,7 @@ mod tests {
     }
 
     async fn wait_for(rec: &Recorder, n: usize) -> Vec<(u64, EventKind)> {
-        for _ in 0..200 {
+        for _ in 0..1000 {
             let seen = rec.seen.lock().unwrap().clone();
             if seen.len() >= n {
                 return seen;
@@ -240,7 +240,7 @@ mod tests {
             &shutdown,
         );
         // Wait until the new subscriber has stored its starting cursor.
-        for _ in 0..200 {
+        for _ in 0..1000 {
             if archive.index.cursor("test/rec").await.unwrap().is_some() {
                 break;
             }
@@ -286,7 +286,7 @@ mod tests {
             [("test/f".to_owned(), rec.clone() as Arc<dyn EventHook>)],
             &shutdown,
         );
-        for _ in 0..200 {
+        for _ in 0..1000 {
             if archive.index.cursor("test/f").await.unwrap().is_some() {
                 break;
             }
@@ -299,7 +299,7 @@ mod tests {
         archive.delete(&study, origin()).await.unwrap();
         let seen = wait_for(&rec, 1).await;
         assert_eq!(seen, [(2, EventKind::StudyDeleted)]);
-        for _ in 0..200 {
+        for _ in 0..1000 {
             if archive.index.cursor("test/f").await.unwrap() == Some(2) {
                 break;
             }

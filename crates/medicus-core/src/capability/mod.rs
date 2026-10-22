@@ -12,8 +12,10 @@ use bytes::Bytes;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
+pub mod host;
 pub mod index;
 
+pub use host::{HostServices, Ingested, Service};
 pub use index::IndexStore;
 
 use crate::BlobKey;
@@ -30,6 +32,7 @@ pub enum CapabilityKind {
     BlobStore,
     EventHook,
     IndexStore,
+    Service,
 }
 
 /// Metadata of a stored blob.

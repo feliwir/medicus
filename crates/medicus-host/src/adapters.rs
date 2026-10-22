@@ -9,11 +9,11 @@ use medicus_abi::bridge::{
     Completion, OwnedBuffer, StreamCompletion, completion, export_stream, stream_completion,
 };
 use medicus_abi::ffi::{
-    MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange, MdStr,
+    MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange, MdServiceVtable,
+    MdStr,
 };
 use medicus_core::BlobKey;
 use medicus_core::Tag;
-use medicus_core::capability::IndexStore;
 use medicus_core::capability::index::{
     DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagStatus, IndexRequest,
     InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome,
@@ -21,6 +21,7 @@ use medicus_core::capability::index::{
 use medicus_core::capability::{
     BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, StorageUsage,
 };
+use medicus_core::capability::{IndexStore, Service};
 use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -347,6 +348,49 @@ impl IndexStore for FfiIndexStore {
 impl Drop for FfiIndexStore {
     fn drop(&mut self) {
         tracing::debug!(addon = %self.addon, "destroying index store");
+        // SAFETY: as for `FfiBlobStore`.
+        unsafe { (self.vtable.destroy)(self.instance) };
+    }
+}
+
+/// A background `Service` implemented by an addon.
+pub(crate) struct FfiService {
+    pub addon: String,
+    pub vtable: &'static MdServiceVtable,
+    pub instance: *mut c_void,
+}
+
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Send for FfiService {}
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Sync for FfiService {}
+
+impl FfiService {
+    fn start_call(
+        &self,
+        f: unsafe extern "C" fn(*mut c_void, medicus_abi::ffi::MdCompletion),
+    ) -> Completion {
+        let (done, fut) = completion();
+        // SAFETY: live instance.
+        unsafe { f(self.instance, done) };
+        fut
+    }
+}
+
+#[async_trait]
+impl Service for FfiService {
+    async fn start(&self) -> Result<()> {
+        self.start_call(self.vtable.start).await.map(drop)
+    }
+
+    async fn stop(&self) -> Result<()> {
+        self.start_call(self.vtable.stop).await.map(drop)
+    }
+}
+
+impl Drop for FfiService {
+    fn drop(&mut self) {
+        tracing::debug!(addon = %self.addon, "destroying service");
         // SAFETY: as for `FfiBlobStore`.
         unsafe { (self.vtable.destroy)(self.instance) };
     }

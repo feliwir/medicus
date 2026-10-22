@@ -23,6 +23,7 @@ index-sqlite = { path = "../../addons/index-sqlite", optional = true }
 storage-fs = { path = "../../addons/storage-fs", optional = true }
 
 anyhow.workspace = true
+async-trait.workspace = true
 async-stream = "0.3"
 axum = "0.8"
 bytes.workspace = true
@@ -46,7 +47,6 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 http-body-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
-async-trait.workspace = true
 medicus-testkit.workspace = true
 figment = { workspace = true, features = ["test"] }
 tempfile.workspace = true

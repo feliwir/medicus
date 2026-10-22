@@ -1,14 +1,23 @@
 //! The `MdHostApi` functions provided to every addon.
 
 use std::ffi::c_void;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
+use medicus_abi::bridge::{CompletionGuard, import_stream};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_INVALID_ARGUMENT,
-    MD_LOG_DEBUG, MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN, MD_OK, MD_UNAVAILABLE, MD_UNSUPPORTED,
-    MdBuffer, MdHostApi, MdStatus, MdStr,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_SERVICE,
+    MD_INVALID_ARGUMENT, MD_LOG_DEBUG, MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN, MD_OK,
+    MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer, MdCancel, MdCompletion, MdHostApi, MdReadStream,
+    MdStatus, MdStr,
 };
+use medicus_core::capability::HostServices;
+use medicus_core::event::Origin;
+use medicus_core::{Error, ErrorKind};
+use tokio::runtime::Handle;
+
+/// The host services, bound once the archive is ready (addons are loaded before it exists).
+pub(crate) type ServicesSlot = Arc<OnceLock<Arc<dyn HostServices>>>;
 
 /// A capability as registered by the addon, before it is adapted.
 #[derive(Debug)]
@@ -24,13 +33,15 @@ unsafe impl Send for RawRegistration {}
 
 /// Per-addon state behind `MdHostApi::ctx`. Leaked: addons may call the host API (e.g. log)
 /// from their own threads at any time until the process exits.
-#[derive(Debug)]
 pub(crate) struct HostCtx {
     pub addon: String,
     pub config: Vec<u8>,
     pub registrations: Mutex<Vec<RawRegistration>>,
     /// Set after `medicus_addon_init` returned; later registrations are refused.
     pub sealed: AtomicBool,
+    pub services: ServicesSlot,
+    /// Runtime on which host service calls run.
+    pub rt: Handle,
 }
 
 /// Creates the host API for one addon. Both the context and the table live for the rest of the
@@ -38,12 +49,16 @@ pub(crate) struct HostCtx {
 pub(crate) fn new_host_api(
     addon: &str,
     config: &serde_json::Value,
+    services: ServicesSlot,
+    rt: Handle,
 ) -> (&'static HostCtx, &'static MdHostApi) {
     let ctx: &'static HostCtx = Box::leak(Box::new(HostCtx {
         addon: addon.to_owned(),
         config: serde_json::to_vec(config).unwrap_or_else(|_| b"null".to_vec()),
         registrations: Mutex::new(Vec::new()),
         sealed: AtomicBool::new(false),
+        services,
+        rt,
     }));
     let api = Box::leak(Box::new(MdHostApi {
         size: size_of::<MdHostApi>(),
@@ -52,6 +67,7 @@ pub(crate) fn new_host_api(
         log: host_log,
         config: host_config,
         register_capability: host_register_capability,
+        ingest: host_ingest,
     }));
     (ctx, api)
 }
@@ -107,7 +123,7 @@ unsafe extern "C" fn host_register_capability(
     }
     if !matches!(
         kind,
-        MD_CAP_BLOB_STORE | MD_CAP_EVENT_HOOK | MD_CAP_INDEX_STORE
+        MD_CAP_BLOB_STORE | MD_CAP_EVENT_HOOK | MD_CAP_INDEX_STORE | MD_CAP_SERVICE
     ) {
         tracing::warn!(addon = %ctx.addon, kind, "unsupported capability kind; refused");
         return MD_UNSUPPORTED;
@@ -128,4 +144,45 @@ unsafe extern "C" fn host_register_capability(
         instance,
     });
     MD_OK
+}
+
+impl std::fmt::Debug for HostCtx {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HostCtx")
+            .field("addon", &self.addon)
+            .field("services_bound", &self.services.get().is_some())
+            .finish_non_exhaustive()
+    }
+}
+
+unsafe extern "C" fn host_ingest(
+    ctx: *mut c_void,
+    data: MdReadStream,
+    origin: MdStr,
+    _cancel: MdCancel,
+    done: MdCompletion,
+) {
+    let guard = CompletionGuard::new(done);
+    // SAFETY: ownership of `data` is transferred to us; importing first guarantees release.
+    let data = unsafe { import_stream(data) };
+    // SAFETY: addons pass back the ctx we gave them; `origin` is valid for this call.
+    let (ctx, origin) = unsafe { (host_ctx(ctx), origin.as_bytes()) };
+    let origin: Origin = match serde_json::from_slice(origin) {
+        Ok(o) => o,
+        Err(e) => return guard.err(&Error::invalid_argument(format!("invalid origin: {e}"))),
+    };
+    let Some(services) = ctx.services.get().cloned() else {
+        return guard.err(&Error::new(
+            ErrorKind::Unavailable,
+            "the archive is not ready yet",
+        ));
+    };
+    ctx.rt.spawn(async move {
+        let result = services.ingest(data, origin).await.and_then(|ingested| {
+            serde_json::to_vec(&ingested)
+                .map(MdBuffer::from_vec)
+                .map_err(|e| Error::internal(e.to_string()))
+        });
+        guard.finish(result);
+    });
 }

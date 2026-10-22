@@ -13,11 +13,11 @@ use futures::FutureExt as _;
 use medicus_abi::bridge::{CompletionGuard, StreamCompletionGuard, export_stream, import_stream};
 use medicus_abi::ffi::{
     MD_PANICKED, MdBlobStoreVtable, MdBuffer, MdCancel, MdCompletion, MdEventHookVtable,
-    MdIndexStoreVtable, MdRange, MdReadStream, MdStr, MdStreamCompletion,
+    MdIndexStoreVtable, MdRange, MdReadStream, MdServiceVtable, MdStr, MdStreamCompletion,
 };
 use medicus_core::BlobKey;
 use medicus_core::capability::index::IndexRequest;
-use medicus_core::capability::{BlobStore, EventHook, IndexStore};
+use medicus_core::capability::{BlobStore, EventHook, IndexStore, Service};
 use medicus_core::event::Event;
 use medicus_core::{Error, Result};
 use serde::Serialize;
@@ -346,5 +346,56 @@ pub(crate) unsafe extern "C" fn destroy_index_store(instance: *mut c_void) {
     guarded(|| {
         // SAFETY: called exactly once per instance created by `index_store`.
         drop(unsafe { Box::from_raw(instance.cast::<DynIndexStore>()) });
+    });
+}
+
+// ------------------------------------------------------------------------------------------------
+// Service
+
+type DynService = Arc<dyn Service>;
+
+static SERVICE_VTABLE: MdServiceVtable = MdServiceVtable {
+    size: size_of::<MdServiceVtable>(),
+    start: service_start,
+    stop: service_stop,
+    destroy: destroy_service,
+};
+
+pub(crate) fn service(service: DynService) -> (*const MdServiceVtable, *mut c_void) {
+    (
+        &raw const SERVICE_VTABLE,
+        Box::into_raw(Box::new(service)).cast(),
+    )
+}
+
+/// # Safety
+/// `instance` must come from [`service`] and not be destroyed yet.
+unsafe fn service_of(instance: *mut c_void) -> DynService {
+    // SAFETY: guaranteed by the caller.
+    unsafe { &*instance.cast::<DynService>() }.clone()
+}
+
+unsafe extern "C" fn service_start(instance: *mut c_void, done: MdCompletion) {
+    let guard = CompletionGuard::new(done);
+    guarded(move || {
+        // SAFETY: the host only calls live instances.
+        let s = unsafe { service_of(instance) };
+        spawn_json(guard, async move { s.start().await });
+    });
+}
+
+unsafe extern "C" fn service_stop(instance: *mut c_void, done: MdCompletion) {
+    let guard = CompletionGuard::new(done);
+    guarded(move || {
+        // SAFETY: the host only calls live instances.
+        let s = unsafe { service_of(instance) };
+        spawn_json(guard, async move { s.stop().await });
+    });
+}
+
+pub(crate) unsafe extern "C" fn destroy_service(instance: *mut c_void) {
+    guarded(|| {
+        // SAFETY: called exactly once per instance created by `service`.
+        drop(unsafe { Box::from_raw(instance.cast::<DynService>()) });
     });
 }

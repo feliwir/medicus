@@ -3,7 +3,14 @@
 Versions refer to `MD_ABI_MAJOR.MD_ABI_MINOR`. While the major version is 0, every minor version
 is a breaking change.
 
-## 0.2 (unreleased)
+## 0.3 (unreleased)
+
+- Added the host function `MdHostApi::ingest`: addons (protocol front-ends) hand DICOM Part 10
+  files to the core's ingest pipeline.
+- Added `MD_CAP_SERVICE` with `MdServiceVtable` (`start`/`stop`): background services the host
+  starts once the archive is ready.
+
+## 0.2
 
 - Added `MD_CAP_INDEX_STORE` with `MdIndexStoreVtable`: a single `call` taking a JSON request
   (`{"method": ..., ...}`), so that new index methods do not change the ABI.

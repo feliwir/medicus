@@ -20,7 +20,7 @@ use core::ffi::c_void;
 /// Major ABI version. While it is 0, every minor change is breaking.
 pub const MD_ABI_MAJOR: u32 = 0;
 /// Minor ABI version.
-pub const MD_ABI_MINOR: u32 = 2;
+pub const MD_ABI_MINOR: u32 = 3;
 /// `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
 pub const MD_ABI_VERSION: u32 = (MD_ABI_MAJOR << 16) | MD_ABI_MINOR;
 
@@ -43,6 +43,7 @@ pub const MD_PANICKED: MdStatus = 10;
 pub const MD_CAP_BLOB_STORE: u32 = 1;
 pub const MD_CAP_EVENT_HOOK: u32 = 2;
 pub const MD_CAP_INDEX_STORE: u32 = 3;
+pub const MD_CAP_SERVICE: u32 = 4;
 
 /// Log levels for `MdHostApi::log`.
 pub const MD_LOG_ERROR: u32 = 1;
@@ -139,6 +140,17 @@ pub struct MdHostApi {
         vtable: *const c_void,
         instance: *mut c_void,
     ) -> MdStatus,
+    /// Ingests a DICOM Part 10 file through the core's ingest pipeline. Takes ownership of
+    /// `data`; `origin` is the JSON event origin (e.g. `{"type": "dimse", ...}`). Result: the
+    /// JSON ingest outcome (`medicus_core::capability::host::Ingested`). Fails with
+    /// `MD_UNAVAILABLE` until the archive is ready (services are started only after that).
+    pub ingest: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        data: MdReadStream,
+        origin: MdStr,
+        cancel: MdCancel,
+        done: MdCompletion,
+    ),
 }
 
 /// Information returned by `medicus_addon_init`. Must stay valid for the lifetime of the process.
@@ -233,6 +245,17 @@ pub struct MdIndexStoreVtable {
         cancel: MdCancel,
         done: MdCompletion,
     ),
+    pub destroy: unsafe extern "C" fn(instance: *mut c_void),
+}
+
+/// `MD_CAP_SERVICE`: a background service (e.g. a network listener) the host starts once the
+/// archive is ready and stops at shutdown. Results are empty.
+#[repr(C)]
+#[derive(Debug)]
+pub struct MdServiceVtable {
+    pub size: usize,
+    pub start: unsafe extern "C" fn(instance: *mut c_void, done: MdCompletion),
+    pub stop: unsafe extern "C" fn(instance: *mut c_void, done: MdCompletion),
     pub destroy: unsafe extern "C" fn(instance: *mut c_void),
 }
 

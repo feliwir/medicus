@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
-use medicus_core::capability::{BlobStore, EventHook, IndexStore};
+use medicus_core::capability::{BlobStore, EventHook, IndexStore, Service};
 use medicus_host::{AddonInfo, AddonLoader, LoadedAddon, StaticAddon};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -31,7 +31,11 @@ pub(crate) struct Capabilities {
     pub(crate) blob_stores: BTreeMap<String, Arc<dyn BlobStore>>,
     /// Event hooks, keyed `<addon>/<hook>`; the key is also the durable subscriber name.
     pub(crate) event_hooks: BTreeMap<String, Arc<dyn EventHook>>,
+    /// Background services, keyed `<addon>/<service>`.
+    pub(crate) services: BTreeMap<String, Arc<dyn Service>>,
     pub(crate) addons: Vec<AddonInfo>,
+    /// The loader, to bind the host services once the archive exists.
+    pub(crate) loader: Option<AddonLoader>,
 }
 
 impl std::fmt::Debug for Capabilities {
@@ -43,8 +47,9 @@ impl std::fmt::Debug for Capabilities {
             )
             .field("blob_stores", &self.blob_stores.keys().collect::<Vec<_>>())
             .field("event_hooks", &self.event_hooks.keys().collect::<Vec<_>>())
+            .field("services", &self.services.keys().collect::<Vec<_>>())
             .field("addons", &self.addons)
-            .finish()
+            .finish_non_exhaustive()
     }
 }
 
@@ -70,6 +75,9 @@ impl Capabilities {
         for c in addon.event_hooks {
             self.event_hooks
                 .insert(format!("{name}/{}", c.name), c.value);
+        }
+        for c in addon.services {
+            self.services.insert(format!("{name}/{}", c.name), c.value);
         }
         self.addons.push(addon.info);
         Ok(())
@@ -153,6 +161,7 @@ pub(crate) fn load(cfg: &Config, rt: &Handle) -> anyhow::Result<Capabilities> {
         caps.add(addon)?;
     }
     tracing::info!(?caps, "addons loaded");
+    caps.loader = Some(loader);
     Ok(caps)
 }
 
