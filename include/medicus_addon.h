@@ -151,21 +151,25 @@ typedef struct MdHostApi {
                                   void *instance);
   /**
    * Ingests a DICOM Part 10 file through the core's ingest pipeline. Takes ownership of
-   * `data`; `origin` is the JSON event origin (e.g. `{"type": "dimse", ...}`). Result: the
-   * JSON ingest outcome (`medicus_core::capability::host::Ingested`). Fails with
-   * `MD_UNAVAILABLE` until the archive is ready (services are started only after that).
+   * `data`; `context` is the JSON call context `{"node": ..., "origin": {"type": "dimse",
+   * ...}}` (ABI 0.6). Result: the JSON ingest outcome
+   * (`medicus_core::capability::host::Ingested`). Fails with `MD_PERMISSION_DENIED` without
+   * the `store` permission and with `MD_UNAVAILABLE` until the archive is ready (services are
+   * started only after that).
    */
   void (*ingest)(void *ctx,
                  struct MdReadStream data,
-                 struct MdStr origin,
+                 struct MdStr context,
                  struct MdCancel cancel,
                  struct MdCompletion done);
   /**
    * Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
-   * Methods: `query` (a query AST → one page of results), `locate` (a study, series or
-   * instance → its stored instances), `peers` (`null` → the configured peers), `job_progress`
-   * (`{"job", "progress"}` → `true`, or `false` once the job was cancelled), `submit_job` (a job
-   * kind → the queued job). Unknown
+   * Data methods take `{"context": ..., <arguments>}` (ABI 0.6): `query` (`query` → one page
+   * of results), `locate` (`resource` → stored instances), `copy_instance` (`instance`,
+   * `destination` node → ingest outcome), `authorize` (`permission`), `permissions` (→ the
+   * caller's permissions on the node), `submit_job` (`kind` → the queued job). Others:
+   * `nodes` and `peers` (`null` → the configured nodes / peers), `job_progress` (`{"job",
+   * "progress"}` → `true`, or `false` once the job was cancelled). Unknown
    * methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
    * ready.
    */
@@ -175,11 +179,11 @@ typedef struct MdHostApi {
                struct MdCancel cancel,
                struct MdCompletion done);
   /**
-   * Opens the Part 10 file of the stored instance with SOP Instance UID `instance`
-   * (ABI 0.4).
+   * Opens the Part 10 file of a stored instance; `request` is `{"context": ...,
+   * "instance": <SOP Instance UID>}` (ABI 0.6).
    */
   void (*open_instance)(void *ctx,
-                        struct MdStr instance,
+                        struct MdStr request,
                         struct MdCancel cancel,
                         struct MdStreamCompletion done);
 } MdHostApi;
@@ -335,6 +339,8 @@ typedef const struct MdAddonInfo *(*MdInitFn)(const struct MdHostApi *host);
 #define MD_INTERNAL 9
 
 #define MD_PANICKED 10
+
+#define MD_PERMISSION_DENIED 11
 
 /* Marks the two entry points as exported from the shared library. */
 #if defined(_WIN32)

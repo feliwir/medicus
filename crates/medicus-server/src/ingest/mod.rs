@@ -69,9 +69,20 @@ impl Archive {
         }
     }
 
-    /// Ingests one DICOM Part 10 file.
+    /// Ingests one DICOM Part 10 file into `partition`.
     pub async fn ingest(
         &self,
+        partition: &Partition,
+        data: ByteStream,
+        origin: Origin,
+    ) -> Result<Ingested> {
+        self.ingest_through(None, partition, data, origin).await
+    }
+
+    /// Ingests one DICOM Part 10 file into `partition`, received through `node`.
+    pub(crate) async fn ingest_through(
+        &self,
+        node: Option<&str>,
         partition: &Partition,
         mut data: ByteStream,
         origin: Origin,
@@ -85,7 +96,8 @@ impl Archive {
         };
 
         // Stream the complete file: the buffered prefix, then the rest as it arrives.
-        let store = self.store(&self.default_store)?;
+        let store_name = self.store_for(partition).to_owned();
+        let store = self.store(&store_name)?;
         let key = BlobKey::generate(partition, BlobKind::Instance);
         let written = Arc::new(AtomicU64::new(0));
         let counter = written.clone();
@@ -111,23 +123,26 @@ impl Archive {
             attributes: parsed.attributes,
             size: meta.size,
             blob: BlobRef {
-                store: self.default_store.clone(),
+                store: store_name.clone(),
                 key: key.clone(),
             },
             header_length: parsed.header_length,
         };
-        let event = Event::new(EventKind::InstanceStored, origin)
-            .with_partition(partition.clone())
-            .with_resource(ResourceRef {
-                patient_id: parsed.patient_id,
-                study: Some(record.study.clone()),
-                series: Some(record.series.clone()),
-                instance: Some(record.instance.clone()),
-                sop_class: Some(record.sop_class.clone()),
-                transfer_syntax: Some(record.transfer_syntax.clone()),
-                size: Some(record.size),
-                blob_store: Some(self.default_store.clone()),
-            });
+        let mut event =
+            Event::new(EventKind::InstanceStored, origin).with_partition(partition.clone());
+        if let Some(node) = node {
+            event = event.with_node(node);
+        }
+        let event = event.with_resource(ResourceRef {
+            patient_id: parsed.patient_id,
+            study: Some(record.study.clone()),
+            series: Some(record.series.clone()),
+            instance: Some(record.instance.clone()),
+            sop_class: Some(record.sop_class.clone()),
+            transfer_syntax: Some(record.transfer_syntax.clone()),
+            size: Some(record.size),
+            blob_store: Some(store_name.clone()),
+        });
         let outcome = match self
             .index
             .store_instance(&record, self.policy, &event)
@@ -135,8 +150,7 @@ impl Archive {
         {
             Ok(o) => o,
             Err(e) => {
-                self.delete_blob_best_effort(&self.default_store, &key)
-                    .await;
+                self.delete_blob_best_effort(&store_name, &key).await;
                 return Err(e);
             }
         };
@@ -147,8 +161,7 @@ impl Archive {
                     .await;
             }
             Duplicate::KeptExisting => {
-                self.delete_blob_best_effort(&self.default_store, &key)
-                    .await;
+                self.delete_blob_best_effort(&store_name, &key).await;
             }
         }
         if let Some(seq) = outcome.seq {

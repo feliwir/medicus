@@ -12,7 +12,7 @@ use axum::{Json, Router};
 use futures::Stream;
 use medicus_core::capability::{Job, JobState, Peer};
 use medicus_core::event::{Event, EventKind};
-use medicus_core::{Error, ErrorKind};
+use medicus_core::{Error, ErrorKind, NodeInfo};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 
@@ -23,6 +23,7 @@ use crate::archive::Archive;
 pub(crate) struct AppState {
     pub(crate) archive: Arc<Archive>,
     pub(crate) jobs: Arc<crate::jobs::Jobs>,
+    pub(crate) directory: Arc<crate::access::Directory>,
     pub(crate) name: String,
     pub(crate) addons: Arc<[medicus_host::AddonInfo]>,
 }
@@ -32,6 +33,7 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/system", get(system))
         .route("/events", get(list_events))
         .route("/events/stream", get(stream_events))
+        .route("/nodes", get(list_nodes))
         .route("/peers", get(list_peers))
         .route("/peers/{name}/echo", post(echo_peer))
         .route("/jobs", get(list_jobs))
@@ -46,6 +48,10 @@ pub(crate) fn router(state: AppState) -> Router {
 
 // ------------------------------------------------------------------------------------------------
 // Peers and jobs
+
+async fn list_nodes(State(s): State<AppState>) -> Json<Vec<NodeInfo>> {
+    Json(s.directory.nodes().map(crate::access::Node::info).collect())
+}
 
 async fn list_peers(State(s): State<AppState>) -> Json<Vec<Peer>> {
     Json(s.jobs.peers().cloned().collect())
@@ -120,7 +126,7 @@ impl IntoResponse for ApiError {
             ErrorKind::InvalidArgument => StatusCode::BAD_REQUEST,
             ErrorKind::NotFound => StatusCode::NOT_FOUND,
             ErrorKind::AlreadyExists => StatusCode::CONFLICT,
-            ErrorKind::Rejected => StatusCode::FORBIDDEN,
+            ErrorKind::Rejected | ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
             ErrorKind::ResourceExhausted => StatusCode::INSUFFICIENT_STORAGE,
             ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,
             ErrorKind::Unsupported => StatusCode::NOT_IMPLEMENTED,
@@ -281,8 +287,10 @@ mod tests {
         cfg.server.data_dir = dir.to_owned();
         let caps = crate::addons::load(&cfg, &tokio::runtime::Handle::current()).unwrap();
         let archive = Arc::new(Archive::new(&caps, &cfg.archive).await.unwrap());
+        let directory = Arc::new(crate::access::Directory::from_config(&cfg).unwrap());
         let jobs = Arc::new(crate::jobs::Jobs::new(
             archive.clone(),
+            directory.clone(),
             [],
             caps.remote_nodes.clone(),
             cfg.jobs.clone(),
@@ -290,6 +298,7 @@ mod tests {
         let state = AppState {
             archive: archive.clone(),
             jobs,
+            directory,
             name: "test".into(),
             addons: caps.addons.clone().into(),
         };
@@ -440,7 +449,13 @@ mod tests {
         };
         let missing = format!(
             "/api/v1/jobs/{}",
-            Job::new(medicus_core::Partition::default_partition(), kind, 1).transaction_uid()
+            Job::new(
+                medicus_core::Partition::default_partition(),
+                "MEDICUS".into(),
+                kind,
+                1,
+            )
+            .transaction_uid()
         );
         assert_eq!(
             send(&app, request("GET", &missing)).await.0,

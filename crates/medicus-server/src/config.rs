@@ -9,9 +9,9 @@ use std::path::{Path, PathBuf};
 
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
-use medicus_core::QueryLevel;
 use medicus_core::capability::Endpoint;
 use medicus_core::capability::index::{DuplicatePolicy, ExtraTag};
+use medicus_core::{AeTitle, Partition, Permission, QueryLevel};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -25,6 +25,91 @@ pub struct Config {
     /// Remote nodes by name, e.g. `[peers.pacs] protocol = "dimse", ae_title = "PACS", ...`.
     pub peers: BTreeMap<String, Endpoint>,
     pub jobs: JobsConfig,
+    /// Partitions (ADR-0003); `default` exists implicitly.
+    pub partitions: BTreeMap<Partition, PartitionConfig>,
+    /// Nodes by name. Without any, the node `MEDICUS` (AE title `MEDICUS`, `DICOMweb` path
+    /// `medicus`) serves the `default` partition.
+    pub nodes: BTreeMap<String, NodeConfig>,
+    /// Roles: named sets of permissions on nodes.
+    pub roles: BTreeMap<String, RoleConfig>,
+    /// Users and entities, with how they are recognized and their roles.
+    pub principals: BTreeMap<String, PrincipalConfig>,
+    pub access: AccessConfig,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PartitionConfig {
+    /// Blob store for the partition's new instances (default: `archive.storage`).
+    pub storage: Option<String>,
+}
+
+/// A node: backed by a local partition or a remote peer, served over DIMSE and/or `DICOMweb`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeConfig {
+    /// The local partition behind the node.
+    #[serde(default)]
+    pub partition: Option<Partition>,
+    /// The peer behind a remote node (instead of a partition).
+    #[serde(default)]
+    pub peer: Option<String>,
+    #[serde(default)]
+    pub dimse: Option<NodeDimseConfig>,
+    #[serde(default)]
+    pub dicomweb: Option<NodeDicomwebConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeDimseConfig {
+    pub ae_title: AeTitle,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NodeDicomwebConfig {
+    /// Path segment: the node is served at `/nodes/{path}/rs`.
+    pub path: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct RoleConfig {
+    pub grants: Vec<GrantConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GrantConfig {
+    /// Node names; `*` means every node.
+    pub nodes: Vec<String>,
+    pub permissions: Vec<Permission>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PrincipalConfig {
+    /// Recognizes DIMSE peers as this principal.
+    pub dimse: Option<DimsePrincipalConfig>,
+    pub roles: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DimsePrincipalConfig {
+    pub calling_ae: AeTitle,
+    /// Networks the peer must connect from (e.g. `10.0.0.0/24`); empty allows any.
+    #[serde(default)]
+    pub networks: Vec<ipnet::IpNet>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct AccessConfig {
+    /// Roles of callers that match no principal. If no roles and principals are configured at
+    /// all, access is open (everyone may do everything), with a warning at start-up.
+    pub anonymous_roles: Vec<String>,
 }
 
 /// The job engine (PLAN §3.5).

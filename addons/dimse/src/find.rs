@@ -10,7 +10,7 @@ use medicus_addon_sdk::Host;
 use medicus_core::capability::HostServices as _;
 use medicus_core::capability::index::DicomJsonObject;
 use medicus_core::query::{Key, MatchOptions, Matcher, Query};
-use medicus_core::{QueryLevel, Tag, VR, tags};
+use medicus_core::{CallContext, QueryLevel, Tag, VR, tags};
 use medicus_dimse::{Matches, Status};
 
 /// Rows fetched from the host per query page.
@@ -89,19 +89,24 @@ impl Find {
     }
 
     /// Streams the identifiers of all matches, page by page.
-    pub(crate) fn run(self, host: Host, ae_title: String) -> Matches {
+    pub(crate) fn run(self, host: Host, context: CallContext, ae_title: String) -> Matches {
         let state = (Some(self), 0u64);
         futures::stream::unfold(state, move |(find, offset)| {
             let ae_title = ae_title.clone();
+            let context = context.clone();
             async move {
                 let find = find?;
                 let mut page = find.query.clone();
                 page.limit = Some(PAGE);
                 page.offset = offset;
-                let result = match host.query(&page).await {
+                let result = match host.query(&context, &page).await {
                     Ok(result) => result,
                     Err(e) => {
-                        let status = Status::new(Status::CANNOT_UNDERSTAND).with_comment(e.message);
+                        let status = if e.kind == medicus_core::ErrorKind::PermissionDenied {
+                            Status::from(&e)
+                        } else {
+                            Status::new(Status::CANNOT_UNDERSTAND).with_comment(e.message)
+                        };
                         return Some((vec![Err(status)], (None, 0)));
                     }
                 };

@@ -3,18 +3,20 @@
 //!
 //! ```toml
 //! [addons.dimse]
-//! config = { ae_title = "MEDICUS", listen = "0.0.0.0:11112" }
+//! config = { listen = "0.0.0.0:11112" }
 //! ```
 //!
-//! Received instances go through the host's ingest, exactly like uploads over HTTP, so they are
-//! indexed, deduplicated and announced as `instance.stored` events with a DIMSE origin. Queries go
-//! through the host's query service, so they see the same data as every other front-end.
+//! One listener serves every node with a DIMSE AE title (ADR-0003): the called AE title selects
+//! the node, and each call to the host carries the node and the caller (calling AE title and
+//! address), so the core decides what the caller may do and in which partition. Received
+//! instances go through the host's ingest, exactly like uploads over `DICOMweb`, so events and
+//! deduplication are the same whatever the protocol.
 
 mod find;
 mod remote;
 mod retrieve;
 
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -22,7 +24,8 @@ use std::time::Duration;
 use medicus_addon_sdk::{Host, Registrar, async_trait, runtime, static_addon};
 use medicus_core::capability::{ByteStream, HostServices as _, Service};
 use medicus_core::event::Origin;
-use medicus_core::{AeTitle, Error, ErrorKind, Result};
+use medicus_core::uid::SopInstanceUid;
+use medicus_core::{AeTitle, CallContext, Error, ErrorKind, Permission, Result};
 use medicus_dimse::{
     AssociationInfo, Destination, FindRequest, Handler, Instance, Matches, RetrieveRequest, Scp,
     ScpOptions, Status, StoreRequest,
@@ -35,18 +38,9 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// This node's AE title.
-    #[serde(default = "default_ae_title")]
-    pub ae_title: String,
     /// Address and port to listen on.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
-    /// Reject associations addressed to another Called AE Title.
-    #[serde(default)]
-    pub require_called_ae: bool,
-    /// Calling AE titles allowed to associate; unset allows any.
-    #[serde(default)]
-    pub allowed_calling: Option<Vec<String>>,
     /// Storage SOP classes accepted in addition to the standard ones (e.g. private classes).
     #[serde(default)]
     pub extra_sop_classes: Vec<String>,
@@ -60,10 +54,6 @@ pub struct Config {
     pub idle_timeout_secs: u64,
     #[serde(default = "default_max_associations")]
     pub max_associations: usize,
-}
-
-fn default_ae_title() -> String {
-    "MEDICUS".into()
 }
 
 fn default_listen() -> SocketAddr {
@@ -83,17 +73,8 @@ fn default_max_associations() -> usize {
 }
 
 impl Config {
-    fn scp_options(&self) -> Result<ScpOptions> {
-        let ae = AeTitle::parse(&self.ae_title)
-            .map_err(|e| Error::invalid_argument(format!("ae_title: {e}")))?;
-        let mut options = ScpOptions::new(ae.as_str());
-        options.require_called_ae = self.require_called_ae;
-        options.allowed_calling = self.allowed_calling.as_ref().map(|titles| {
-            titles
-                .iter()
-                .map(|t| t.trim().to_owned())
-                .collect::<HashSet<_>>()
-        });
+    fn scp_options(&self, ae_titles: impl IntoIterator<Item = String>) -> ScpOptions {
+        let mut options = ScpOptions::new(ae_titles);
         options
             .storage_sop_classes
             .extend(self.extra_sop_classes.iter().cloned());
@@ -112,42 +93,70 @@ impl Config {
         options.idle_timeout =
             (self.idle_timeout_secs > 0).then(|| Duration::from_secs(self.idle_timeout_secs));
         options.max_associations = self.max_associations;
-        Ok(options)
+        options
     }
 }
 
-/// Hands received instances to the host's ingest.
+/// Serves the nodes' DIMSE AE titles through the host's services.
 #[derive(Debug)]
-struct Ingest {
+struct Nodes {
     host: Host,
-    ae_title: AeTitle,
+    /// Called AE title → node name.
+    by_ae: HashMap<String, String>,
 }
 
-impl Ingest {
-    fn origin(&self, association: &AssociationInfo) -> Result<Origin> {
-        let calling_ae = AeTitle::parse(&association.calling_ae)
-            .map_err(|e| Error::invalid_argument(format!("calling AE title: {e}")))?;
-        let called_ae =
-            AeTitle::parse(&association.called_ae).unwrap_or_else(|_| self.ae_title.clone());
-        Ok(Origin::Dimse {
-            calling_ae,
-            called_ae,
-            peer: association.peer.to_string(),
-            association: Some(association.id),
-        })
+fn sub_operation_failure(e: &Error) -> Status {
+    if e.kind == ErrorKind::PermissionDenied {
+        Status::from(e)
+    } else {
+        Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.message.clone())
+    }
+}
+
+impl Nodes {
+    /// The call context of an association: its node (by called AE title) and its caller.
+    fn context(&self, association: &AssociationInfo) -> Result<CallContext> {
+        let node = self.by_ae.get(&association.called_ae).ok_or_else(|| {
+            Error::not_found(format!("no node with AE title {:?}", association.called_ae))
+        })?;
+        let ae = |raw: &str, what: &str| {
+            AeTitle::parse(raw).map_err(|e| Error::invalid_argument(format!("{what}: {e}")))
+        };
+        Ok(CallContext::new(
+            node.clone(),
+            Origin::Dimse {
+                calling_ae: ae(&association.calling_ae, "calling AE title")?,
+                called_ae: ae(&association.called_ae, "called AE title")?,
+                peer: association.peer.to_string(),
+                association: Some(association.id),
+            },
+        ))
     }
 }
 
 #[async_trait]
-impl Handler for Ingest {
+impl Handler for Nodes {
+    async fn admit(&self, association: Arc<AssociationInfo>) -> bool {
+        let Ok(context) = self.context(&association) else {
+            return false;
+        };
+        match self.host.permissions(&context).await {
+            Ok(permissions) => !permissions.is_empty(),
+            Err(e) => {
+                tracing::warn!(association = %association.id, error = %e, "cannot check permissions");
+                false
+            }
+        }
+    }
+
     async fn store(
         &self,
         association: Arc<AssociationInfo>,
         request: StoreRequest,
         data: ByteStream,
     ) -> Status {
-        let result = match self.origin(&association) {
-            Ok(origin) => self.host.ingest(data, origin).await,
+        let result = match self.context(&association) {
+            Ok(context) => self.host.ingest(&context, data).await,
             Err(e) => Err(e),
         };
         match result {
@@ -176,9 +185,14 @@ impl Handler for Ingest {
         request: FindRequest,
         identifier: dicom_object::InMemDicomObject,
     ) -> Result<Matches, Status> {
+        let context = self.context(&association).map_err(|e| Status::from(&e))?;
+        self.host
+            .authorize(&context, Permission::Query)
+            .await
+            .map_err(|e| Status::from(&e))?;
         let find = find::Find::parse(&request.sop_class, &identifier)?;
         tracing::debug!(association = %association.id, level = %find.query.level, keys = find.query.keys.len(), "C-FIND");
-        Ok(find.run(self.host, self.ae_title.as_str().to_owned()))
+        Ok(find.run(self.host, context, association.called_ae.clone()))
     }
 
     async fn retrieve(
@@ -187,46 +201,114 @@ impl Handler for Ingest {
         request: RetrieveRequest,
         identifier: dicom_object::InMemDicomObject,
     ) -> Result<Vec<Instance>, Status> {
-        let instances = retrieve::instances(&self.host, &request.sop_class, &identifier).await?;
+        let context = self.context(&association).map_err(|e| Status::from(&e))?;
+        if request.destination.is_some() {
+            // A C-MOVE sends the instances on: the caller needs `send` as well as `retrieve`.
+            self.host
+                .authorize(&context, Permission::Send)
+                .await
+                .map_err(|e| Status::from(&e))?;
+        }
+        let instances =
+            retrieve::instances(&self.host, &context, &request.sop_class, &identifier).await?;
         tracing::debug!(association = %association.id, destination = ?request.destination, instances = instances.len(), "retrieve");
         Ok(instances)
     }
 
-    async fn open(&self, instance: &Instance) -> Result<ByteStream, Status> {
-        let uid =
-            medicus_core::uid::SopInstanceUid::parse(&instance.sop_instance).map_err(|e| {
-                Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.to_string())
-            })?;
-        self.host.open_instance(&uid).await.map_err(|e| {
-            Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.message)
-        })
+    async fn open(
+        &self,
+        association: Arc<AssociationInfo>,
+        instance: &Instance,
+    ) -> Result<ByteStream, Status> {
+        let context = self
+            .context(&association)
+            .map_err(|e| sub_operation_failure(&e))?;
+        let uid = SopInstanceUid::parse(&instance.sop_instance).map_err(|e| {
+            Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.to_string())
+        })?;
+        self.host
+            .open_instance(&context, &uid)
+            .await
+            .map_err(|e| sub_operation_failure(&e))
     }
 
-    async fn destination(&self, ae_title: &str) -> Option<Destination> {
+    async fn destination(
+        &self,
+        _association: Arc<AssociationInfo>,
+        ae_title: &str,
+    ) -> Option<Destination> {
+        if self.by_ae.contains_key(ae_title) {
+            return Some(Destination::Local {
+                ae_title: ae_title.to_owned(),
+            });
+        }
         retrieve::destination(&self.host, ae_title).await
+    }
+
+    async fn copy(
+        &self,
+        association: Arc<AssociationInfo>,
+        instance: &Instance,
+        destination: &str,
+    ) -> Status {
+        let (Ok(context), Ok(uid), Some(node)) = (
+            self.context(&association),
+            SopInstanceUid::parse(&instance.sop_instance),
+            self.by_ae.get(destination),
+        ) else {
+            return Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS);
+        };
+        match self.host.copy_instance(&context, &uid, node).await {
+            Ok(_) => Status::success(),
+            Err(e) => {
+                tracing::warn!(association = %association.id, instance = %uid, destination, error = %e, "copy to a local node failed");
+                sub_operation_failure(&e)
+            }
+        }
     }
 }
 
-/// The listener, started and stopped by the host.
+/// The listener, started and stopped by the host. The served AE titles are read from the host's
+/// nodes when it starts.
 #[derive(Debug)]
 struct Listener {
-    listen: SocketAddr,
-    scp: Arc<Scp<Ingest>>,
+    host: Host,
+    cfg: Config,
     running: Mutex<Option<(CancellationToken, JoinHandle<()>)>>,
 }
 
 #[async_trait]
 impl Service for Listener {
     async fn start(&self) -> Result<()> {
-        let listener = TcpListener::bind(self.listen).await.map_err(|e| {
+        let by_ae: HashMap<String, String> = self
+            .host
+            .nodes()
+            .await?
+            .into_iter()
+            // Remote nodes are proxies; serving them over DIMSE is not supported yet.
+            .filter(|n| !n.remote)
+            .filter_map(|n| Some((n.ae_title?.as_str().to_owned(), n.name)))
+            .collect();
+        if by_ae.is_empty() {
+            tracing::warn!("no local node has a DIMSE AE title; the DIMSE listener is not started");
+            return Ok(());
+        }
+        let scp = Arc::new(Scp::new(
+            self.cfg.scp_options(by_ae.keys().cloned()),
+            Nodes {
+                host: self.host,
+                by_ae: by_ae.clone(),
+            },
+        ));
+        let listen = self.cfg.listen;
+        let listener = TcpListener::bind(listen).await.map_err(|e| {
             Error::new(
                 ErrorKind::Unavailable,
-                format!("cannot listen on {}: {e}", self.listen),
+                format!("cannot listen on {listen}: {e}"),
             )
         })?;
-        let addr = listener.local_addr().unwrap_or(self.listen);
+        let addr = listener.local_addr().unwrap_or(listen);
         let token = CancellationToken::new();
-        let scp = self.scp.clone();
         let shutdown = token.clone();
         let task = runtime().spawn(async move { scp.serve(listener, shutdown).await });
         let previous = self
@@ -237,7 +319,9 @@ impl Service for Listener {
         if let Some((token, _)) = previous {
             token.cancel();
         }
-        tracing::info!(listen = %addr, "DIMSE storage SCP listening");
+        let mut ae_titles: Vec<_> = by_ae.keys().collect();
+        ae_titles.sort();
+        tracing::info!(listen = %addr, ?ae_titles, "DIMSE listening");
         Ok(())
     }
 
@@ -250,7 +334,7 @@ impl Service for Listener {
         if let Some((token, task)) = running {
             token.cancel();
             let _ = task.await;
-            tracing::info!("DIMSE storage SCP stopped");
+            tracing::info!("DIMSE stopped");
         }
         Ok(())
     }
@@ -258,25 +342,13 @@ impl Service for Listener {
 
 pub fn init(reg: &mut Registrar) -> Result<()> {
     let cfg: Config = reg.config()?;
-    let options = cfg.scp_options()?;
-    let ingest = Ingest {
-        host: reg.host(),
-        ae_title: AeTitle::parse(&options.ae_title)
-            .map_err(|e| Error::invalid_argument(e.to_string()))?,
-    };
-    tracing::info!(ae_title = %options.ae_title, listen = %cfg.listen, "DIMSE addon configured");
+    tracing::info!(listen = %cfg.listen, "DIMSE addon configured");
+    reg.register_remote_node("dimse", remote::Dimse { host: reg.host() })?;
     let listener = Listener {
-        listen: cfg.listen,
-        scp: Arc::new(Scp::new(options, ingest)),
+        host: reg.host(),
+        cfg,
         running: Mutex::new(None),
     };
-    reg.register_remote_node(
-        "dimse",
-        remote::Dimse {
-            host: reg.host(),
-            ae_title: cfg.ae_title.clone(),
-        },
-    )?;
     reg.register_service("scp", listener)
 }
 

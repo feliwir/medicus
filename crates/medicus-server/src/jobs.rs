@@ -20,6 +20,7 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+use crate::access::Directory;
 use crate::archive::Archive;
 use crate::config::JobsConfig;
 
@@ -30,6 +31,7 @@ const PAGE: u32 = 100;
 
 pub(crate) struct Jobs {
     archive: Arc<Archive>,
+    directory: Arc<Directory>,
     peers: BTreeMap<String, Peer>,
     nodes: BTreeMap<String, Arc<dyn RemoteNode>>,
     cfg: JobsConfig,
@@ -57,12 +59,14 @@ fn protocol(peer: &Peer) -> &'static str {
 impl Jobs {
     pub(crate) fn new(
         archive: Arc<Archive>,
+        directory: Arc<Directory>,
         peers: impl IntoIterator<Item = Peer>,
         nodes: BTreeMap<String, Arc<dyn RemoteNode>>,
         cfg: JobsConfig,
     ) -> Self {
         Self {
             archive,
+            directory,
             peers: peers.into_iter().map(|p| (p.name.clone(), p)).collect(),
             nodes,
             cfg,
@@ -96,7 +100,13 @@ impl Jobs {
     }
 
     /// Queues a job; it runs as soon as a slot is free.
-    pub(crate) async fn submit(&self, partition: &Partition, kind: JobKind) -> Result<Job> {
+    /// Queues a job for data of `partition`, submitted through `node`.
+    pub(crate) async fn submit(
+        &self,
+        partition: &Partition,
+        node: &str,
+        kind: JobKind,
+    ) -> Result<Job> {
         match &kind {
             JobKind::Send { peer, resources } => {
                 self.resolve(peer)?;
@@ -105,7 +115,12 @@ impl Jobs {
                 }
             }
         }
-        let job = Job::new(partition.clone(), kind, self.cfg.max_attempts);
+        let job = Job::new(
+            partition.clone(),
+            node.to_owned(),
+            kind,
+            self.cfg.max_attempts,
+        );
         self.archive.index.put_job(&job).await?;
         tracing::info!(job = %job.id, "job queued");
         self.wake.notify_one();
@@ -310,7 +325,8 @@ impl Jobs {
             ..JobProgress::default()
         };
         self.archive.index.put_job(job).await?;
-        let outcome = node.send(job.id, peer, &instances).await?;
+        let source = self.directory.node(&job.node)?.info();
+        let outcome = node.send(job.id, &source, peer, &instances).await?;
         job.progress = JobProgress {
             total: instances.len() as u64,
             completed: outcome.completed,
@@ -383,6 +399,7 @@ mod tests {
         async fn send(
             &self,
             _job: Uuid,
+            _node: &medicus_core::NodeInfo,
             _peer: &Peer,
             instances: &[SopInstanceUid],
         ) -> Result<medicus_core::capability::SendOutcome> {
@@ -434,7 +451,11 @@ mod tests {
             },
         };
         let nodes = BTreeMap::from([("dimse".to_owned(), flaky.clone() as Arc<dyn RemoteNode>)]);
-        (Arc::new(Jobs::new(archive, [peer], nodes, cfg.jobs)), flaky)
+        let directory = Arc::new(Directory::from_config(&cfg).unwrap());
+        (
+            Arc::new(Jobs::new(archive, directory, [peer], nodes, cfg.jobs)),
+            flaky,
+        )
     }
 
     fn send_study() -> JobKind {
@@ -464,7 +485,11 @@ mod tests {
         let stop = CancellationToken::new();
         let runner = tokio::spawn(jobs.clone().run(stop.clone()));
         let job = jobs
-            .submit(&medicus_core::Partition::default_partition(), send_study())
+            .submit(
+                &medicus_core::Partition::default_partition(),
+                crate::access::DEFAULT_NODE,
+                send_study(),
+            )
             .await
             .unwrap();
         let done = wait(&jobs, job.id, JobState::Succeeded).await;
@@ -488,15 +513,23 @@ mod tests {
             )],
         };
         assert_eq!(
-            jobs.submit(&medicus_core::Partition::default_partition(), unknown)
-                .await
-                .unwrap_err()
-                .kind,
+            jobs.submit(
+                &medicus_core::Partition::default_partition(),
+                crate::access::DEFAULT_NODE,
+                unknown
+            )
+            .await
+            .unwrap_err()
+            .kind,
             ErrorKind::NotFound
         );
         // Without a running scheduler the job stays queued.
         let job = jobs
-            .submit(&medicus_core::Partition::default_partition(), send_study())
+            .submit(
+                &medicus_core::Partition::default_partition(),
+                crate::access::DEFAULT_NODE,
+                send_study(),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -511,7 +544,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (jobs, flaky) = engine(dir.path()).await;
         let job = jobs
-            .submit(&medicus_core::Partition::default_partition(), send_study())
+            .submit(
+                &medicus_core::Partition::default_partition(),
+                crate::access::DEFAULT_NODE,
+                send_study(),
+            )
             .await
             .unwrap();
         // A crash after claiming leaves the job running.

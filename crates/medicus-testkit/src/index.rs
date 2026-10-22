@@ -268,9 +268,9 @@ async fn jobs(index: &dyn IndexStore) {
         )],
     };
     let now = OffsetDateTime::now_utc();
-    let mut first = Job::new(part(), send("a"), 3);
+    let mut first = Job::new(part(), "NODE".into(), send("a"), 3);
     first.created_at = now - Duration::seconds(10);
-    let mut second = Job::new(part(), send("b"), 3);
+    let mut second = Job::new(part(), "NODE".into(), send("b"), 3);
     second.created_at = now - Duration::seconds(5);
     second.not_before = now + Duration::hours(1);
     index.put_job(&first).await.unwrap();

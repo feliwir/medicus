@@ -6,11 +6,11 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::Partition;
 use crate::capability::host::Peer;
 use crate::capability::index::ResourceUid;
 use crate::error::Result;
 use crate::uid::SopInstanceUid;
+use crate::{NodeInfo, Partition};
 
 /// What a job does.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -65,6 +65,8 @@ pub struct Job {
     pub id: Uuid,
     /// The partition the job's data belongs to (for a send: the source).
     pub partition: Partition,
+    /// The node the job was submitted through; its executor acts as that node.
+    pub node: String,
     #[serde(flatten)]
     pub kind: JobKind,
     pub state: JobState,
@@ -89,11 +91,12 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn new(partition: Partition, kind: JobKind, max_attempts: u32) -> Self {
+    pub fn new(partition: Partition, node: String, kind: JobKind, max_attempts: u32) -> Self {
         let now = OffsetDateTime::now_utc();
         Self {
             id: Uuid::now_v7(),
             partition,
+            node,
             kind,
             state: JobState::Queued,
             attempts: 0,
@@ -132,6 +135,7 @@ mod tests {
     fn transaction_uids_round_trip() {
         let job = Job::new(
             Partition::default_partition(),
+            "MEDICUS".into(),
             JobKind::Send {
                 peer: "p".into(),
                 resources: Vec::new(),
@@ -165,6 +169,7 @@ pub enum RemoteRequest {
     },
     Send {
         job: Uuid,
+        node: NodeInfo,
         peer: Peer,
         instances: Vec<SopInstanceUid>,
     },
@@ -176,13 +181,15 @@ pub trait RemoteNode: Send + Sync + 'static {
     /// Checks that the peer is reachable and answers (e.g. C-ECHO).
     async fn echo(&self, peer: &Peer) -> Result<()>;
 
-    /// Sends stored instances to the peer for job `job`, reporting progress through
+    /// Sends stored instances of `node` to the peer for job `job`, acting as that node (e.g. its
+    /// AE title) and reading through it with a job origin. Progress goes to
     /// [`HostServices::job_progress`](crate::capability::HostServices::job_progress), which also
     /// says when the job was cancelled. An `Err` means nothing more could be sent (e.g. the peer
     /// is unreachable); per-instance failures are part of the outcome.
     async fn send(
         &self,
         job: Uuid,
+        node: &NodeInfo,
         peer: &Peer,
         instances: &[SopInstanceUid],
     ) -> Result<SendOutcome>;

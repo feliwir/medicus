@@ -7,7 +7,7 @@ use medicus_core::capability::index::{InstanceLocation, ResourceUid};
 use medicus_core::capability::{Endpoint, HostServices as _};
 use medicus_core::query::{Attributes, Key, Matcher, Query};
 use medicus_core::uid::{SeriesInstanceUid, SopInstanceUid, StudyInstanceUid};
-use medicus_core::{Error, ErrorKind, QueryLevel, VR, tags};
+use medicus_core::{CallContext, Error, ErrorKind, QueryLevel, VR, tags};
 use medicus_dimse::{Destination, Instance, Status};
 
 /// The information models served.
@@ -26,7 +26,11 @@ fn mismatch(comment: impl Into<String>) -> Status {
 }
 
 fn failure(e: &Error) -> Status {
-    Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.message.clone())
+    if e.kind == ErrorKind::PermissionDenied {
+        Status::from(e)
+    } else {
+        Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.message.clone())
+    }
 }
 
 /// The values of the unique key `tag` (a single value or a list of UIDs).
@@ -59,6 +63,7 @@ fn parse<T>(
 /// The stored instances an identifier selects, in index order.
 pub(crate) async fn instances(
     host: &Host,
+    context: &CallContext,
     sop_class: &str,
     identifier: &InMemDicomObject,
 ) -> Result<Vec<Instance>, Status> {
@@ -79,7 +84,7 @@ pub(crate) async fn instances(
     let mut resources = Vec::new();
     for key in &keys {
         match level {
-            QueryLevel::Patient => resources.extend(patient_studies(host, key).await?),
+            QueryLevel::Patient => resources.extend(patient_studies(host, context, key).await?),
             QueryLevel::Study => {
                 resources.push(ResourceUid::Study(parse(key, StudyInstanceUid::parse)?));
             }
@@ -93,7 +98,7 @@ pub(crate) async fn instances(
     }
     let mut out = Vec::new();
     for resource in &resources {
-        match host.locate(resource).await {
+        match host.locate(context, resource).await {
             Ok(found) => out.extend(found.iter().map(instance)),
             // A UID that matches nothing selects nothing.
             Err(e) if e.kind == ErrorKind::NotFound => {}
@@ -112,7 +117,11 @@ fn instance(location: &InstanceLocation) -> Instance {
 }
 
 /// The studies of the patient with Patient ID `patient_id`.
-async fn patient_studies(host: &Host, patient_id: &str) -> Result<Vec<ResourceUid>, Status> {
+async fn patient_studies(
+    host: &Host,
+    context: &CallContext,
+    patient_id: &str,
+) -> Result<Vec<ResourceUid>, Status> {
     let mut query = Query::new(QueryLevel::Study)
         .with_key(Key {
             tag: tags::PATIENT_ID,
@@ -125,7 +134,7 @@ async fn patient_studies(host: &Host, patient_id: &str) -> Result<Vec<ResourceUi
     query.limit = Some(PAGE);
     let mut studies = Vec::new();
     loop {
-        let page = host.query(&query).await.map_err(|e| failure(&e))?;
+        let page = host.query(context, &query).await.map_err(|e| failure(&e))?;
         for row in &page.rows {
             let Some(uid) = Attributes::values(row, tags::STUDY_INSTANCE_UID)
                 .and_then(|v| v.into_iter().next())
@@ -155,7 +164,7 @@ pub(crate) async fn destination(host: &Host, ae_title: &str) -> Option<Destinati
             ae_title: peer_ae,
             host,
             port,
-        } if peer_ae.as_str() == ae_title => Some(Destination {
+        } if peer_ae.as_str() == ae_title => Some(Destination::Remote {
             ae_title: peer_ae.as_str().to_owned(),
             address: format!("{host}:{port}"),
         }),

@@ -23,9 +23,9 @@ use tokio::sync::oneshot;
 
 use crate::ffi::{
     MD_ALREADY_EXISTS, MD_CANCELLED, MD_INTERNAL, MD_INVALID_ARGUMENT, MD_NOT_FOUND, MD_OK,
-    MD_PANICKED, MD_REJECTED, MD_RESOURCE_EXHAUSTED, MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer,
-    MdCancel, MdCompletion, MdRange, MdReadStream, MdReadStreamVtable, MdStatus, MdStr,
-    MdStreamCompletion,
+    MD_PANICKED, MD_PERMISSION_DENIED, MD_REJECTED, MD_RESOURCE_EXHAUSTED, MD_UNAVAILABLE,
+    MD_UNSUPPORTED, MdBuffer, MdCancel, MdCompletion, MdRange, MdReadStream, MdReadStreamVtable,
+    MdStatus, MdStr, MdStreamCompletion,
 };
 
 // ------------------------------------------------------------------------------------------------
@@ -42,6 +42,7 @@ pub fn status_of(kind: ErrorKind) -> MdStatus {
         ErrorKind::Cancelled => MD_CANCELLED,
         ErrorKind::Unsupported => MD_UNSUPPORTED,
         ErrorKind::Panicked => MD_PANICKED,
+        ErrorKind::PermissionDenied => MD_PERMISSION_DENIED,
         _ => MD_INTERNAL,
     }
 }
@@ -58,6 +59,7 @@ pub fn kind_of(status: MdStatus) -> ErrorKind {
         MD_CANCELLED => ErrorKind::Cancelled,
         MD_UNSUPPORTED => ErrorKind::Unsupported,
         MD_PANICKED => ErrorKind::Panicked,
+        MD_PERMISSION_DENIED => ErrorKind::PermissionDenied,
         _ => ErrorKind::Internal,
     }
 }

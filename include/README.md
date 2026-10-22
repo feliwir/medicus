@@ -107,13 +107,17 @@ in [`CHANGELOG.md`](CHANGELOG.md).
 
 Protocol addons reach the archive through `MdHostApi`, never through other addons:
 
-- `ingest` takes a read stream of a Part 10 file and an origin (JSON) and completes with the JSON
-  ingest outcome.
+- Every data operation names a **call context** `{"node": <node name>, "origin": <who is
+  calling>}`: the core checks the caller's permission on the node (`MD_PERMISSION_DENIED`
+  otherwise) and works in the node's partition only. `nodes` lists the nodes to serve.
+- `ingest` takes a read stream of a Part 10 file and the call context (JSON) and completes with
+  the JSON ingest outcome.
 - `call` takes a method name and a JSON request and completes with the JSON response:
   `query` (a query AST, as in `medicus_core::query::Query` → `QueryResult`), `locate` (`{"level":
   "study" | "series" | "instance", "uid": ...}` → stored instances) and `peers` (`null` → configured
   peers).
-- `open_instance` takes a SOP Instance UID and completes with a read stream of the stored file.
+- `open_instance` takes `{"context", "instance": <SOP Instance UID>}` and completes with a read
+  stream of the stored file.
 
 A protocol addon can also register a `MD_CAP_REMOTE_NODE` under its protocol's name (e.g.
 `dimse`) to serve the archive's peers of that protocol: its `call` gets `{"method": "echo",

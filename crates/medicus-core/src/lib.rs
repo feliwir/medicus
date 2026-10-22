@@ -10,6 +10,7 @@
 //!
 //! Every type that crosses the addon boundary has a stable serde representation.
 
+pub mod access;
 pub mod ae;
 pub mod blob;
 pub mod capability;
@@ -21,6 +22,7 @@ pub mod query;
 pub mod tag;
 pub mod uid;
 
+pub use access::{CallContext, NodeInfo, Permission};
 pub use ae::AeTitle;
 pub use blob::BlobKey;
 pub use error::{Error, ErrorKind, Result};

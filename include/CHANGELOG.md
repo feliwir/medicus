@@ -6,8 +6,14 @@ is a breaking change.
 ## 0.6 (unreleased)
 
 - Partitions (ADR-0003): index requests `query`, `locate`, `delete` and `update_extra` take a
-  `partition`; instance records and locations, events (`partition`) and jobs carry one;
-  `stored_bytes` returns `[{partition, store, bytes}]`.
+  `partition`; instance records and locations, events (`partition`, `node`) and jobs (`partition`,
+  `node`) carry one; `stored_bytes` returns `[{partition, store, bytes}]`.
+- Call context (ADR-0003): `ingest` takes the JSON call context `{"node", "origin"}` instead of
+  the origin; `open_instance` takes `{"context", "instance"}`; the data methods of `call`
+  (`query`, `locate`, `submit_job`) take `{"context", ...}`. The core checks the caller's
+  permission on the node and fails with the new status `MD_PERMISSION_DENIED` (11).
+- New host methods: `copy_instance`, `authorize`, `permissions`, `nodes`.
+- `RemoteNode` `send` requests carry the `node` (`NodeInfo`) the job was submitted through.
 
 ## 0.5
 

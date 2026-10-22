@@ -52,10 +52,9 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 /// Configuration of an [`Scp`].
 #[derive(Debug, Clone)]
 pub struct ScpOptions {
-    /// This node's AE title.
-    pub ae_title: String,
-    /// Reject associations whose Called AE Title is not [`ae_title`](Self::ae_title).
-    pub require_called_ae: bool,
+    /// The AE titles served; associations must call one of them. The called AE title is also
+    /// the calling AE title of C-MOVE sub-operations.
+    pub ae_titles: Vec<String>,
     /// Calling AE titles allowed to associate; `None` allows any.
     pub allowed_calling: Option<HashSet<String>>,
     /// Abstract syntaxes accepted for C-STORE (Verification is always accepted).
@@ -77,10 +76,9 @@ pub struct ScpOptions {
 }
 
 impl ScpOptions {
-    pub fn new(ae_title: impl Into<String>) -> Self {
+    pub fn new(ae_titles: impl IntoIterator<Item = impl Into<String>>) -> Self {
         Self {
-            ae_title: ae_title.into(),
-            require_called_ae: false,
+            ae_titles: ae_titles.into_iter().map(Into::into).collect(),
             allowed_calling: None,
             storage_sop_classes: crate::storage::all().map(str::to_owned).collect(),
             find_sop_classes: Vec::new(),
@@ -147,12 +145,25 @@ pub struct RetrieveRequest {
     pub destination: Option<String>,
 }
 
-/// Where a C-MOVE destination AE title is reached.
+/// Where a C-MOVE destination AE title is.
 #[derive(Debug, Clone)]
-pub struct Destination {
-    pub ae_title: String,
-    /// `host:port`.
-    pub address: String,
+pub enum Destination {
+    /// A remote AE, reached over a new association.
+    Remote {
+        ae_title: String,
+        /// `host:port`.
+        address: String,
+    },
+    /// An AE served by this handler: instances are copied through [`Handler::copy`].
+    Local { ae_title: String },
+}
+
+impl Destination {
+    pub fn ae_title(&self) -> &str {
+        match self {
+            Self::Remote { ae_title, .. } | Self::Local { ae_title } => ae_title,
+        }
+    }
 }
 
 /// The matches of a C-FIND, each an identifier to return; an `Err` ends the query with that
@@ -199,15 +210,41 @@ pub trait Handler: Send + Sync + 'static {
     }
 
     /// Opens the stored Part 10 file of an instance returned by [`retrieve`](Self::retrieve).
-    async fn open(&self, instance: &Instance) -> Result<ByteStream, Status> {
-        let _ = instance;
+    async fn open(
+        &self,
+        association: Arc<AssociationInfo>,
+        instance: &Instance,
+    ) -> Result<ByteStream, Status> {
+        let _ = (association, instance);
         Err(Status::new(Status::SOP_CLASS_NOT_SUPPORTED))
     }
 
     /// Resolves a C-MOVE destination; `None` if it is unknown.
-    async fn destination(&self, ae_title: &str) -> Option<Destination> {
-        let _ = ae_title;
+    async fn destination(
+        &self,
+        association: Arc<AssociationInfo>,
+        ae_title: &str,
+    ) -> Option<Destination> {
+        let _ = (association, ae_title);
         None
+    }
+
+    /// A C-MOVE sub-operation to a [`Destination::Local`]: copies the instance there.
+    async fn copy(
+        &self,
+        association: Arc<AssociationInfo>,
+        instance: &Instance,
+        destination: &str,
+    ) -> Status {
+        let _ = (association, instance, destination);
+        Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS)
+    }
+
+    /// Decides, once an association is established, whether to serve it at all (e.g. whether
+    /// the caller has any permission on the called node). `false` aborts it.
+    async fn admit(&self, association: Arc<AssociationInfo>) -> bool {
+        let _ = association;
+        true
     }
 }
 
@@ -222,8 +259,7 @@ pub struct Scp<H> {
 impl<H: Handler> Scp<H> {
     pub fn new(config: ScpOptions, handler: H) -> Self {
         let access = Access {
-            ae_title: config.ae_title.clone(),
-            require_called_ae: config.require_called_ae,
+            ae_titles: config.ae_titles.iter().cloned().collect(),
             allowed_calling: config.allowed_calling.clone(),
         };
         let roles = Roles {
@@ -232,7 +268,7 @@ impl<H: Handler> Scp<H> {
         let mut options = ServerAssociationOptions::new()
             .ae_access_control(access)
             .with_negotiation(roles)
-            .ae_title(config.ae_title.clone())
+            .ae_title(config.ae_titles.first().cloned().unwrap_or_default())
             .max_pdu_length(config.max_pdu_length)
             .with_abstract_syntax(uids::VERIFICATION);
         if let Some(timeout) = config.idle_timeout {
@@ -284,12 +320,10 @@ impl<H: Handler> Scp<H> {
             while associations.try_join_next().is_some() {}
             let options = self.options.clone();
             let handler = self.handler.clone();
-            let ae_title = self.config.ae_title.clone();
             let shutdown = shutdown.clone();
             associations.spawn(async move {
                 let _permit = permit;
-                let result =
-                    serve_connection(&options, handler, ae_title, socket, peer, shutdown).await;
+                let result = serve_connection(&options, handler, socket, peer, shutdown).await;
                 if let Err(e) = result {
                     tracing::info!(peer = %peer, error = %e, "association ended with an error");
                 }
@@ -307,8 +341,7 @@ impl<H: Handler> Scp<H> {
 /// AE title based access control.
 #[derive(Debug, Clone)]
 struct Access {
-    ae_title: String,
-    require_called_ae: bool,
+    ae_titles: HashSet<String>,
     allowed_calling: Option<HashSet<String>>,
 }
 
@@ -320,7 +353,7 @@ impl AccessControl for Access {
         called_ae_title: &str,
         _user_identity: Option<&UserIdentity>,
     ) -> Result<(), AssociationRJServiceUserReason> {
-        if self.require_called_ae && called_ae_title.trim() != self.ae_title {
+        if !self.ae_titles.contains(called_ae_title.trim()) {
             return Err(AssociationRJServiceUserReason::CalledAETitleNotRecognized);
         }
         if let Some(allowed) = &self.allowed_calling
@@ -359,7 +392,6 @@ impl Negotiation for Roles {
 async fn serve_connection<H: Handler>(
     options: &ServerAssociationOptions<'static, Access, Roles>,
     handler: Arc<H>,
-    ae_title: String,
     socket: TcpStream,
     peer: SocketAddr,
     shutdown: CancellationToken,
@@ -384,6 +416,12 @@ async fn serve_connection<H: Handler>(
             .count(),
         "association established"
     );
+    if !handler.admit(info.clone()).await {
+        tracing::info!(association = %info.id, calling_ae = %info.calling_ae, called_ae = %info.called_ae, "association refused: no access to the called node");
+        let _ = association.abort().await;
+        return Ok(());
+    }
+    let ae_title = info.called_ae.clone();
     let mut session = Session {
         association,
         info,
@@ -888,7 +926,7 @@ mod tests {
     #[test]
     #[allow(deprecated)] // Explicit VR Big Endian is retired but still received
     fn accepts_any_readable_transfer_syntax_by_default() {
-        let mut options = ScpOptions::new("MEDICUS");
+        let mut options = ScpOptions::new(["MEDICUS"]);
         let accepted = options.accepted_transfer_syntaxes();
         for ts in [
             uids::IMPLICIT_VR_LITTLE_ENDIAN,

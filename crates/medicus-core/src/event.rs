@@ -44,6 +44,7 @@ pub enum EventKind {
     JobFailed,
     PeerUnreachable,
     AddonUnhealthy,
+    AccessDenied,
     Other(String),
 }
 
@@ -65,6 +66,7 @@ const CORE_KINDS: &[(EventKind, &str)] = &[
     (EventKind::JobProgress, "job.progress"),
     (EventKind::JobFinished, "job.finished"),
     (EventKind::JobFailed, "job.failed"),
+    (EventKind::AccessDenied, "access.denied"),
     (EventKind::PeerUnreachable, "peer.unreachable"),
     (EventKind::AddonUnhealthy, "addon.unhealthy"),
 ];
@@ -218,6 +220,9 @@ pub struct Event {
     /// The partition the event concerns; `None` for node-wide events (e.g. `storage.full`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub partition: Option<crate::Partition>,
+    /// The node through which the change was made, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<ResourceRef>,
     pub origin: Origin,
@@ -236,6 +241,7 @@ impl Event {
             time: OffsetDateTime::now_utc(),
             kind,
             partition: None,
+            node: None,
             resource: None,
             origin,
             detail: serde_json::Value::Null,
@@ -245,6 +251,12 @@ impl Event {
     #[must_use]
     pub fn with_partition(mut self, partition: crate::Partition) -> Self {
         self.partition = Some(partition);
+        self
+    }
+
+    #[must_use]
+    pub fn with_node(mut self, node: impl Into<String>) -> Self {
+        self.node = Some(node.into());
         self
     }
 

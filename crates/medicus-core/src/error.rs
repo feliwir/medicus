@@ -13,6 +13,8 @@ pub enum ErrorKind {
     AlreadyExists,
     /// Refused by policy (e.g. an ingest filter).
     Rejected,
+    /// The caller lacks the permission for the operation on the node (ADR-0003).
+    PermissionDenied,
     /// Out of space, quota or another limited resource.
     ResourceExhausted,
     /// Temporarily unavailable; the operation may be retried.
@@ -31,6 +33,7 @@ impl ErrorKind {
             Self::NotFound => "not found",
             Self::AlreadyExists => "already exists",
             Self::Rejected => "rejected",
+            Self::PermissionDenied => "permission denied",
             Self::ResourceExhausted => "resource exhausted",
             Self::Unavailable => "unavailable",
             Self::Cancelled => "cancelled",

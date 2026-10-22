@@ -13,10 +13,9 @@ use medicus_abi::ffi::{
 };
 use medicus_core::capability::index::ResourceUid;
 use medicus_core::capability::{HostServices, JobKind, JobProgress};
-use medicus_core::event::Origin;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
-use medicus_core::{Error, ErrorKind};
+use medicus_core::{CallContext, Error, ErrorKind, Permission};
 use tokio::runtime::Handle;
 
 /// The host services, bound once the archive is ready (addons are loaded before it exists).
@@ -167,18 +166,18 @@ impl std::fmt::Debug for HostCtx {
 unsafe extern "C" fn host_ingest(
     ctx: *mut c_void,
     data: MdReadStream,
-    origin: MdStr,
+    context: MdStr,
     _cancel: MdCancel,
     done: MdCompletion,
 ) {
     let guard = CompletionGuard::new(done);
     // SAFETY: ownership of `data` is transferred to us; importing first guarantees release.
     let data = unsafe { import_stream(data) };
-    // SAFETY: addons pass back the ctx we gave them; `origin` is valid for this call.
-    let (ctx, origin) = unsafe { (host_ctx(ctx), origin.as_bytes()) };
-    let origin: Origin = match serde_json::from_slice(origin) {
-        Ok(o) => o,
-        Err(e) => return guard.err(&Error::invalid_argument(format!("invalid origin: {e}"))),
+    // SAFETY: addons pass back the ctx we gave them; `context` is valid for this call.
+    let (ctx, context) = unsafe { (host_ctx(ctx), context.as_bytes()) };
+    let context: CallContext = match parse("call context", context) {
+        Ok(c) => c,
+        Err(e) => return guard.err(&e),
     };
     let Some(services) = ctx.services.get().cloned() else {
         return guard.err(&Error::new(
@@ -187,7 +186,7 @@ unsafe extern "C" fn host_ingest(
         ));
     };
     ctx.rt.spawn(async move {
-        let result = services.ingest(data, origin).await.and_then(|ingested| {
+        let result = services.ingest(&context, data).await.and_then(|ingested| {
             serde_json::to_vec(&ingested)
                 .map(MdBuffer::from_vec)
                 .map_err(|e| Error::internal(e.to_string()))
@@ -211,13 +210,53 @@ fn to_buffer<T: serde::Serialize>(value: &T) -> Result<MdBuffer, Error> {
         .map_err(|e| Error::internal(e.to_string()))
 }
 
-/// A parsed `call` request.
+/// A parsed `call` request. Data methods carry the call context next to their arguments.
 enum Call {
-    Query(Query),
-    Locate(ResourceUid),
+    Query(WithContext<QueryArgs>),
+    Locate(WithContext<LocateArgs>),
+    CopyInstance(WithContext<CopyArgs>),
+    Authorize(WithContext<AuthorizeArgs>),
+    Permissions(WithContext<NoArgs>),
+    SubmitJob(WithContext<SubmitArgs>),
+    Nodes,
     Peers,
     JobProgress(JobProgressRequest),
-    SubmitJob(JobKind),
+}
+
+#[derive(serde::Deserialize)]
+struct WithContext<T> {
+    context: CallContext,
+    #[serde(flatten)]
+    args: T,
+}
+
+#[derive(serde::Deserialize)]
+struct NoArgs {}
+
+#[derive(serde::Deserialize)]
+struct QueryArgs {
+    query: Query,
+}
+
+#[derive(serde::Deserialize)]
+struct LocateArgs {
+    resource: ResourceUid,
+}
+
+#[derive(serde::Deserialize)]
+struct CopyArgs {
+    instance: SopInstanceUid,
+    destination: String,
+}
+
+#[derive(serde::Deserialize)]
+struct AuthorizeArgs {
+    permission: Permission,
+}
+
+#[derive(serde::Deserialize)]
+struct SubmitArgs {
+    kind: JobKind,
 }
 
 #[derive(serde::Deserialize)]
@@ -229,11 +268,15 @@ struct JobProgressRequest {
 impl Call {
     fn parse(method: &[u8], request: &[u8]) -> Result<Self, Error> {
         match method {
-            b"query" => parse("query", request).map(Self::Query),
-            b"locate" => parse("resource", request).map(Self::Locate),
+            b"query" => parse("query request", request).map(Self::Query),
+            b"locate" => parse("locate request", request).map(Self::Locate),
+            b"copy_instance" => parse("copy request", request).map(Self::CopyInstance),
+            b"authorize" => parse("authorize request", request).map(Self::Authorize),
+            b"permissions" => parse("permissions request", request).map(Self::Permissions),
+            b"submit_job" => parse("job request", request).map(Self::SubmitJob),
+            b"nodes" => Ok(Self::Nodes),
             b"peers" => Ok(Self::Peers),
             b"job_progress" => parse("job progress", request).map(Self::JobProgress),
-            b"submit_job" => parse("job", request).map(Self::SubmitJob),
             other => Err(Error::unsupported(format!(
                 "unknown host method {:?}",
                 String::from_utf8_lossy(other)
@@ -243,11 +286,21 @@ impl Call {
 
     async fn run(self, services: &dyn HostServices) -> Result<MdBuffer, Error> {
         match self {
-            Self::Query(q) => to_buffer(&services.query(&q).await?),
-            Self::Locate(r) => to_buffer(&services.locate(&r).await?),
+            Self::Query(r) => to_buffer(&services.query(&r.context, &r.args.query).await?),
+            Self::Locate(r) => to_buffer(&services.locate(&r.context, &r.args.resource).await?),
+            Self::CopyInstance(r) => to_buffer(
+                &services
+                    .copy_instance(&r.context, &r.args.instance, &r.args.destination)
+                    .await?,
+            ),
+            Self::Authorize(r) => {
+                to_buffer(&services.authorize(&r.context, r.args.permission).await?)
+            }
+            Self::Permissions(r) => to_buffer(&services.permissions(&r.context).await?),
+            Self::SubmitJob(r) => to_buffer(&services.submit_job(&r.context, r.args.kind).await?),
+            Self::Nodes => to_buffer(&services.nodes().await?),
             Self::Peers => to_buffer(&services.peers().await?),
             Self::JobProgress(r) => to_buffer(&services.job_progress(r.job, r.progress).await?),
-            Self::SubmitJob(kind) => to_buffer(&services.submit_job(kind).await?),
         }
     }
 }
@@ -275,22 +328,30 @@ unsafe extern "C" fn host_call(
 
 unsafe extern "C" fn host_open_instance(
     ctx: *mut c_void,
-    instance: MdStr,
+    request: MdStr,
     _cancel: MdCancel,
     done: MdStreamCompletion,
 ) {
+    #[derive(serde::Deserialize)]
+    struct OpenArgs {
+        instance: SopInstanceUid,
+    }
     let guard = StreamCompletionGuard::new(done);
-    // SAFETY: addons pass back the ctx we gave them; `instance` is valid for this call.
-    let (ctx, instance) = unsafe { (host_ctx(ctx), instance.to_str()) };
-    let Ok(Ok(instance)) = instance.map(SopInstanceUid::parse) else {
-        return guard.err(&Error::invalid_argument("invalid SOP Instance UID"));
+    // SAFETY: addons pass back the ctx we gave them; `request` is valid for this call.
+    let (ctx, request) = unsafe { (host_ctx(ctx), request.as_bytes()) };
+    let request: WithContext<OpenArgs> = match parse("open request", request) {
+        Ok(r) => r,
+        Err(e) => return guard.err(&e),
     };
     let Some(services) = ctx.services.get().cloned() else {
         return guard.err(&unavailable());
     };
     let rt = ctx.rt.clone();
     ctx.rt.spawn(async move {
-        match services.open_instance(&instance).await {
+        match services
+            .open_instance(&request.context, &request.args.instance)
+            .await
+        {
             Ok(stream) => guard.ok(export_stream(stream, &rt)),
             Err(e) => guard.err(&e),
         }

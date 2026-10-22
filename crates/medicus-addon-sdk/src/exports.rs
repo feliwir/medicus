@@ -401,9 +401,10 @@ async fn dispatch_remote(
         RemoteRequest::Echo { peer } => json(&node.echo(&peer).await?),
         RemoteRequest::Send {
             job,
+            node: info,
             peer,
             instances,
-        } => json(&node.send(job, &peer, &instances).await?),
+        } => json(&node.send(job, &info, &peer, &instances).await?),
     }
 }
 

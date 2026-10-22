@@ -1,6 +1,7 @@
 //! The medicus core server as a library: the `medicus` binary is a thin CLI on top of it, and
 //! tools (benchmarks) and integration tests use the same API.
 
+mod access;
 mod addons;
 mod api;
 mod archive;
@@ -32,6 +33,7 @@ use medicus_core::capability::Peer;
 #[derive(Debug)]
 pub struct Node {
     pub archive: Arc<Archive>,
+    directory: Arc<access::Directory>,
     jobs: Arc<jobs::Jobs>,
     caps: addons::Capabilities,
     cfg: Config,
@@ -40,14 +42,25 @@ pub struct Node {
 impl Node {
     /// Loads the addons and wires the archive.
     pub async fn open(cfg: Config) -> anyhow::Result<Self> {
+        let directory = Arc::new(access::Directory::from_config(&cfg)?);
         let caps = addons::load(&cfg, &tokio::runtime::Handle::current())?;
-        let archive = Arc::new(Archive::new(&caps, &cfg.archive).await?);
+        let partition_stores = cfg
+            .partitions
+            .iter()
+            .filter_map(|(p, c)| Some((p.clone(), c.storage.clone()?)))
+            .collect();
+        let archive = Arc::new(
+            Archive::new(&caps, &cfg.archive)
+                .await?
+                .with_partition_stores(partition_stores)?,
+        );
         let peers = cfg.peers.iter().map(|(name, endpoint)| Peer {
             name: name.clone(),
             endpoint: endpoint.clone(),
         });
         let jobs = Arc::new(jobs::Jobs::new(
             archive.clone(),
+            directory.clone(),
             peers,
             caps.remote_nodes.clone(),
             cfg.jobs.clone(),
@@ -55,12 +68,14 @@ impl Node {
         if let Some(loader) = &caps.loader {
             loader.bind_services(Arc::new(services::NodeServices {
                 archive: archive.clone(),
+                directory: directory.clone(),
                 jobs: jobs.clone(),
             }));
         }
         tracing::info!(?archive, "archive ready");
         Ok(Self {
             archive,
+            directory,
             jobs,
             caps,
             cfg,
@@ -81,6 +96,7 @@ impl Node {
         let state = api::AppState {
             archive: self.archive.clone(),
             jobs: self.jobs.clone(),
+            directory: self.directory.clone(),
             name: self.cfg.server.name.clone(),
             addons: self.caps.addons.clone().into(),
         };

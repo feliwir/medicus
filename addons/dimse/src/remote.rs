@@ -7,36 +7,35 @@ use medicus_core::capability::index::ResourceUid;
 use medicus_core::capability::{
     Endpoint, HostServices as _, JobProgress, Peer, RemoteNode, SendOutcome,
 };
+use medicus_core::event::Origin;
 use medicus_core::uid::SopInstanceUid;
-use medicus_core::{Error, ErrorKind, Result};
+use medicus_core::{AeTitle, CallContext, Error, ErrorKind, NodeInfo, Result};
 use medicus_dimse::{Instance, MAX_CONTEXTS, ScuOptions, StoreScu};
 use uuid::Uuid;
+
+/// The calling AE title when no node is involved (echo) or the node has none.
+const DEFAULT_CALLING_AE: &str = "MEDICUS";
 
 #[derive(Debug)]
 pub(crate) struct Dimse {
     pub(crate) host: Host,
-    pub(crate) ae_title: String,
+}
+
+fn options(calling_ae: &str, peer: &Peer) -> ScuOptions {
+    let Endpoint::Dimse {
+        ae_title,
+        host,
+        port,
+    } = &peer.endpoint;
+    ScuOptions::new(calling_ae, ae_title.as_str(), format!("{host}:{port}"))
 }
 
 impl Dimse {
-    fn options(&self, peer: &Peer) -> ScuOptions {
-        let Endpoint::Dimse {
-            ae_title,
-            host,
-            port,
-        } = &peer.endpoint;
-        ScuOptions::new(
-            self.ae_title.clone(),
-            ae_title.as_str(),
-            format!("{host}:{port}"),
-        )
-    }
-
     /// How a stored instance is encoded.
-    async fn describe(&self, uid: &SopInstanceUid) -> Result<Instance> {
+    async fn describe(&self, context: &CallContext, uid: &SopInstanceUid) -> Result<Instance> {
         let location = self
             .host
-            .locate(&ResourceUid::Instance(uid.clone()))
+            .locate(context, &ResourceUid::Instance(uid.clone()))
             .await?
             .into_iter()
             .next()
@@ -74,7 +73,7 @@ fn batches(instances: Vec<(SopInstanceUid, Instance)>) -> Vec<Vec<(SopInstanceUi
 #[async_trait]
 impl RemoteNode for Dimse {
     async fn echo(&self, peer: &Peer) -> Result<()> {
-        let status = medicus_dimse::echo(&self.options(peer))
+        let status = medicus_dimse::echo(&options(DEFAULT_CALLING_AE, peer))
             .await
             .map_err(|e| unreachable(peer, &e))?;
         if status.is_success() {
@@ -90,7 +89,19 @@ impl RemoteNode for Dimse {
         }
     }
 
-    async fn send(&self, job: Uuid, peer: &Peer, uids: &[SopInstanceUid]) -> Result<SendOutcome> {
+    async fn send(
+        &self,
+        job: Uuid,
+        node: &NodeInfo,
+        peer: &Peer,
+        uids: &[SopInstanceUid],
+    ) -> Result<SendOutcome> {
+        // Reads go through the node as the job's executor; the peer sees the node's AE title.
+        let context = CallContext::new(node.name.clone(), Origin::Job { job_id: job });
+        let calling_ae = node
+            .ae_title
+            .as_ref()
+            .map_or(DEFAULT_CALLING_AE, AeTitle::as_str);
         let mut outcome = SendOutcome::default();
         let mut progress = JobProgress {
             total: uids.len() as u64,
@@ -98,13 +109,13 @@ impl RemoteNode for Dimse {
         };
         let mut known = Vec::new();
         for uid in uids {
-            match self.describe(uid).await {
+            match self.describe(&context, uid).await {
                 Ok(instance) => known.push((uid.clone(), instance)),
                 Err(e) if e.kind == ErrorKind::NotFound => outcome.failed.push(uid.clone()),
                 Err(e) => return Err(e),
             }
         }
-        let options = self.options(peer);
+        let options = options(calling_ae, peer);
         let mut connected = false;
         let mut batches = batches(known).into_iter();
         while let Some(batch) = batches.next() {
@@ -128,7 +139,7 @@ impl RemoteNode for Dimse {
             connected = true;
             let mut items = batch.into_iter();
             while let Some((uid, instance)) = items.next() {
-                let file = self.host.open_instance(&uid).await?;
+                let file = self.host.open_instance(&context, &uid).await?;
                 match scu.store(&instance, file, None).await {
                     Ok(status) if status.is_success() => outcome.completed += 1,
                     Ok(status) if status.is_warning() => outcome.warning += 1,

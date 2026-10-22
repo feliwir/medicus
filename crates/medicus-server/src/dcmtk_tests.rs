@@ -45,17 +45,24 @@ fn free_port() -> u16 {
         .port()
 }
 
-async fn node_with_dimse(data_dir: &Path, port: u16, extra: serde_json::Value) -> Node {
-    node_with_peers(data_dir, port, extra, []).await
+async fn node_with_dimse(data_dir: &Path, port: u16, toml: &str) -> Node {
+    node_with_peers(data_dir, port, toml, []).await
 }
 
 async fn node_with_peers(
     data_dir: &Path,
     port: u16,
-    extra: serde_json::Value,
+    toml: &str,
     peers: impl IntoIterator<Item = (&'static str, u16)>,
 ) -> Node {
-    let mut cfg = Config::default();
+    // Nodes, roles and principals of the scenario.
+    let mut cfg: Config = {
+        use figment::providers::{Format, Serialized, Toml};
+        figment::Figment::from(Serialized::defaults(Config::default()))
+            .merge(Toml::string(toml))
+            .extract()
+            .unwrap()
+    };
     // One attempt per job, so a job to an unreachable peer fails right away.
     cfg.jobs.max_attempts = 1;
     for (ae, peer_port) in peers {
@@ -69,10 +76,7 @@ async fn node_with_peers(
         );
     }
     cfg.server.data_dir = data_dir.to_owned();
-    let mut config = json!({ "ae_title": "MEDICUS", "listen": format!("127.0.0.1:{port}") });
-    if let (Some(config), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
-        config.extend(extra.clone());
-    }
+    let config = json!({ "listen": format!("127.0.0.1:{port}") });
     cfg.addons.entries.insert(
         "dimse".into(),
         AddonEntry {
@@ -115,7 +119,7 @@ async fn echoscu_and_storescu() {
     let Some(bin) = dcmtk_bin() else { return };
     let dir = tempfile::tempdir().unwrap();
     let port = free_port();
-    let node = node_with_dimse(&dir.path().join("data"), port, json!({})).await;
+    let node = node_with_dimse(&dir.path().join("data"), port, "").await;
     let port_arg = port.to_string();
 
     assert!(
@@ -205,42 +209,32 @@ async fn unknown_calling_ae_is_rejected() {
     let Some(bin) = dcmtk_bin() else { return };
     let dir = tempfile::tempdir().unwrap();
     let port = free_port();
-    let node = node_with_dimse(
-        dir.path(),
-        port,
-        json!({ "allowed_calling": ["MODALITY1"] }),
-    )
-    .await;
-    let port_arg = port.to_string();
+    let access = r#"
+        [roles.verify]
+        grants = [{ nodes = ["MEDICUS"], permissions = ["query"] }]
+        [principals.modality1]
+        dimse = { calling_ae = "MODALITY1", networks = ["127.0.0.0/8"] }
+        roles = ["verify"]
+    "#;
+    let node = node_with_dimse(dir.path(), port, access).await;
+    let echo = |calling: &str| {
+        args(&[
+            "-v",
+            "-aet",
+            calling,
+            "-aec",
+            "MEDICUS",
+            "127.0.0.1",
+            &port.to_string(),
+        ])
+    };
+    // Associations from callers without any permission on the node are aborted at once.
+    let (_, log) = tool_log(&bin, "echoscu", echo("INTRUDER")).await;
+    assert!(log.contains("Peer Aborted Association"), "{log}");
+    let (ok, log) = tool_log(&bin, "echoscu", echo("MODALITY1")).await;
     assert!(
-        !run(
-            &bin,
-            "echoscu",
-            args(&[
-                "-aet",
-                "INTRUDER",
-                "-aec",
-                "MEDICUS",
-                "127.0.0.1",
-                &port_arg
-            ])
-        )
-        .await
-    );
-    assert!(
-        run(
-            &bin,
-            "echoscu",
-            args(&[
-                "-aet",
-                "MODALITY1",
-                "-aec",
-                "MEDICUS",
-                "127.0.0.1",
-                &port_arg
-            ])
-        )
-        .await
+        ok && log.contains("Received Echo Response (Success)"),
+        "{log}"
     );
     node.stop_services().await;
 }
@@ -360,7 +354,7 @@ async fn findscu_queries_every_level() {
     let Some(bin) = dcmtk_bin() else { return };
     let dir = tempfile::tempdir().unwrap();
     let port = free_port();
-    let node = node_with_dimse(dir.path(), port, json!({})).await;
+    let node = node_with_dimse(dir.path(), port, "").await;
     ingest_patients(&node).await;
 
     // Patient root, PATIENT level, wildcard.
@@ -543,13 +537,7 @@ async fn movescu_and_getscu_retrieve() {
     let Some(bin) = dcmtk_bin() else { return };
     let dir = tempfile::tempdir().unwrap();
     let (port, dest_port) = (free_port(), free_port());
-    let node = node_with_peers(
-        &dir.path().join("data"),
-        port,
-        json!({}),
-        [("DEST", dest_port)],
-    )
-    .await;
+    let node = node_with_peers(&dir.path().join("data"), port, "", [("DEST", dest_port)]).await;
     ingest_patients(&node).await;
     let port_arg = port.to_string();
     let base = |model: &str| {
@@ -676,7 +664,7 @@ async fn send_jobs_to_storescp() {
     let node = node_with_peers(
         &dir.path().join("data"),
         port,
-        json!({}),
+        "",
         [("DEST", dest_port), ("DOWN", down_port)],
     )
     .await;
@@ -698,6 +686,7 @@ async fn send_jobs_to_storescp() {
         .jobs
         .submit(
             &medicus_core::Partition::default_partition(),
+            crate::access::DEFAULT_NODE,
             JobKind::Send {
                 peer: "dest".into(),
                 resources: vec![study("1.9.2"), study("1.9.1")],
@@ -717,6 +706,7 @@ async fn send_jobs_to_storescp() {
         .jobs
         .submit(
             &medicus_core::Partition::default_partition(),
+            crate::access::DEFAULT_NODE,
             JobKind::Send {
                 peer: "down".into(),
                 resources: vec![study("1.9.1")],
@@ -740,5 +730,118 @@ async fn send_jobs_to_storescp() {
     assert!(kinds.contains(&EventKind::JobFinished));
     stop.cancel();
     runner.await.unwrap();
+    node.stop_services().await;
+}
+
+/// movescu arguments: study 1.7.1 from node A to node B, as `calling`.
+fn move_study_to_b(calling: &str, port: u16) -> Vec<String> {
+    let mut list = args(&[
+        "-v", "-aet", calling, "-aec", "NODE_A", "-aem", "NODE_B", "-S",
+    ]);
+    for key in ["QueryRetrieveLevel=STUDY", "StudyInstanceUID=1.7.1"] {
+        list.extend(["-k".to_owned(), key.to_owned()]);
+    }
+    list.extend(["127.0.0.1".to_owned(), port.to_string()]);
+    list
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn nodes_partitions_and_permissions() {
+    let Some(bin) = dcmtk_bin() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let config = r#"
+        [partitions.tenant-a]
+        [partitions.tenant-b]
+        [nodes.A]
+        partition = "tenant-a"
+        dimse = { ae_title = "NODE_A" }
+        [nodes.B]
+        partition = "tenant-b"
+        dimse = { ae_title = "NODE_B" }
+        [roles.modality]
+        grants = [{ nodes = ["A", "B"], permissions = ["store"] }]
+        [roles.viewer]
+        grants = [{ nodes = ["A", "B"], permissions = ["query", "retrieve", "send"] }]
+        [principals.ct]
+        dimse = { calling_ae = "CT01" }
+        roles = ["modality"]
+        [principals.viewer]
+        dimse = { calling_ae = "VIEWER" }
+        roles = ["viewer"]
+    "#;
+    let node = node_with_dimse(dir.path(), port, config).await;
+    let port_arg = port.to_string();
+    let files = dir.path().join("files");
+    std::fs::create_dir(&files).unwrap();
+    let file = InstanceBuilder::new("1.7.1", "1.7.1.1", "1.7.1.1.1").build();
+    std::fs::write(files.join("a.dcm"), &file).unwrap();
+    let store = |calling: &str, called: &str| {
+        let mut list = args(&["-v", "-aet", calling, "-aec", called, "127.0.0.1"]);
+        list.extend([port_arg.clone(), files.join("a.dcm").display().to_string()]);
+        list
+    };
+    let find = |calling: &str, called: &str| {
+        let mut list = args(&["-v", "-aet", calling, "-aec", called, "-S"]);
+        for key in ["QueryRetrieveLevel=STUDY", "StudyInstanceUID"] {
+            list.extend(["-k".to_owned(), key.to_owned()]);
+        }
+        list.extend(["127.0.0.1".to_owned(), port_arg.clone()]);
+        list
+    };
+
+    // The modality may store into A; the viewer may not store.
+    let (ok, log) = tool_log(&bin, "storescu", store("CT01", "NODE_A")).await;
+    assert!(ok, "{log}");
+    let (_, log) = tool_log(&bin, "storescu", store("VIEWER", "NODE_A")).await;
+    assert!(log.contains("0x124"), "{log}");
+
+    // The study exists in A's partition only.
+    let (ok, log) = tool_log(&bin, "findscu", find("VIEWER", "NODE_A")).await;
+    assert!(ok && log.contains("1.7.1"), "{log}");
+    let (ok, log) = tool_log(&bin, "findscu", find("VIEWER", "NODE_B")).await;
+    assert!(ok && !log.contains("1.7.1"), "{log}");
+    // The modality may not query.
+    let (_, log) = tool_log(&bin, "findscu", find("CT01", "NODE_A")).await;
+    assert!(log.contains("0x124"), "{log}");
+
+    // C-MOVE from A to the local node B copies into B's partition, as the viewer: it may send
+    // from A but not store into B, so nothing is copied...
+    let (_, log) = tool_log(&bin, "movescu", move_study_to_b("VIEWER", port)).await;
+    assert!(log.contains("Failed") || log.contains("Warning"), "{log}");
+    let b = medicus_core::Partition::parse("tenant-b").unwrap();
+    let study = medicus_core::capability::index::ResourceUid::Study("1.7.1".parse().unwrap());
+    assert!(
+        node.archive
+            .index
+            .locate(&b, &study)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    node.stop_services().await;
+
+    // ...while a principal with all permissions copies it.
+    let full = format!(
+        "{config}\n[roles.admin]\ngrants = [{{ nodes = [\"*\"], permissions = [\"query\", \"retrieve\", \"store\", \"send\"] }}]\n[principals.admin]\ndimse = {{ calling_ae = \"ADMIN\" }}\nroles = [\"admin\"]\n"
+    );
+    let port = free_port();
+    let node = node_with_dimse(dir.path(), port, &full).await;
+    let (ok, log) = tool_log(&bin, "movescu", move_study_to_b("ADMIN", port)).await;
+    assert!(ok, "{log}");
+    let copied = node.archive.index.locate(&b, &study).await.unwrap();
+    assert_eq!(copied.len(), 1);
+    assert_eq!(copied[0].partition, b);
+    let a = medicus_core::Partition::parse("tenant-a").unwrap();
+    let original = node.archive.index.locate(&a, &study).await.unwrap();
+    assert_ne!(
+        copied[0].blob, original[0].blob,
+        "partitions never share blobs"
+    );
+    let events = node.archive.index.events_after(0, 1000).await.unwrap();
+    assert!(events.iter().any(|e| e.kind == EventKind::AccessDenied));
+    assert!(events.iter().any(|e| e.kind == EventKind::InstanceStored
+        && e.node.as_deref() == Some("B")
+        && e.partition.as_ref() == Some(&b)));
     node.stop_services().await;
 }

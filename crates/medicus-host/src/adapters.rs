@@ -24,7 +24,7 @@ use medicus_core::capability::{
 use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
-use medicus_core::{BlobKey, Partition, Tag};
+use medicus_core::{BlobKey, NodeInfo, Partition, Tag};
 use medicus_core::{Error, Result};
 use serde::de::DeserializeOwned;
 use tokio::runtime::Handle;
@@ -435,11 +435,13 @@ impl RemoteNode for FfiRemoteNode {
     async fn send(
         &self,
         job: uuid::Uuid,
+        node: &NodeInfo,
         peer: &Peer,
         instances: &[SopInstanceUid],
     ) -> Result<SendOutcome> {
         self.call(&RemoteRequest::Send {
             job,
+            node: node.clone(),
             peer: peer.clone(),
             instances: instances.to_vec(),
         })

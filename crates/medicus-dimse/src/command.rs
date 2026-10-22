@@ -114,7 +114,9 @@ impl From<&medicus_core::Error> for Status {
     /// The C-STORE status for an ingest failure: `A700` for conditions the sender may retry
     /// later (full storage, temporarily unavailable), `C000` for everything else.
     fn from(e: &medicus_core::Error) -> Self {
-        let code = if e.kind.is_transient() {
+        let code = if e.kind == medicus_core::ErrorKind::PermissionDenied {
+            Self::NOT_AUTHORIZED
+        } else if e.kind.is_transient() {
             Self::OUT_OF_RESOURCES
         } else {
             Self::CANNOT_UNDERSTAND

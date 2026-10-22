@@ -6,16 +6,15 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::AeTitle;
 use crate::capability::ByteStream;
 use crate::capability::index::{Duplicate, InstanceLocation, QueryResult, ResourceUid};
 use crate::capability::job::{Job, JobKind, JobProgress};
 use crate::error::Result;
-use crate::event::Origin;
 use crate::query::Query;
 use crate::uid::{
     SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid, TransferSyntaxUid,
 };
+use crate::{AeTitle, CallContext, NodeInfo, Permission};
 use uuid::Uuid;
 
 /// The result of ingesting one instance.
@@ -53,28 +52,57 @@ pub enum Endpoint {
     },
 }
 
-/// What the host offers addons.
+/// What the host offers addons. Data operations carry a [`CallContext`]: the core checks the
+/// caller's permission on the node (`PermissionDenied` otherwise) and confines the call to the
+/// node's partition.
 #[async_trait]
 pub trait HostServices: Send + Sync + 'static {
-    /// Ingests a DICOM Part 10 file through the core's ingest pipeline.
-    async fn ingest(&self, data: ByteStream, origin: Origin) -> Result<Ingested>;
+    /// Ingests a DICOM Part 10 file through the core's ingest pipeline (needs `store`).
+    async fn ingest(&self, context: &CallContext, data: ByteStream) -> Result<Ingested>;
 
-    /// Runs a query. Unlike [`IndexStore::query`](crate::capability::IndexStore::query) the
-    /// answer is complete: keys the index cannot evaluate are matched, and requested attributes
-    /// it does not store are filled in, from the stored instances' headers.
-    async fn query(&self, query: &Query) -> Result<QueryResult>;
+    /// Runs a query (needs `query`). Unlike
+    /// [`IndexStore::query`](crate::capability::IndexStore::query) the answer is complete: keys
+    /// the index cannot evaluate are matched, and requested attributes it does not store are
+    /// filled in, from the stored instances' headers.
+    async fn query(&self, context: &CallContext, query: &Query) -> Result<QueryResult>;
 
-    /// The stored instances of a study, series or instance.
-    async fn locate(&self, resource: &ResourceUid) -> Result<Vec<InstanceLocation>>;
+    /// The stored instances of a study, series or instance (needs `retrieve`).
+    async fn locate(
+        &self,
+        context: &CallContext,
+        resource: &ResourceUid,
+    ) -> Result<Vec<InstanceLocation>>;
 
-    /// Opens a stored instance's Part 10 file.
-    async fn open_instance(&self, instance: &SopInstanceUid) -> Result<ByteStream>;
+    /// Opens a stored instance's Part 10 file (needs `retrieve`).
+    async fn open_instance(
+        &self,
+        context: &CallContext,
+        instance: &SopInstanceUid,
+    ) -> Result<ByteStream>;
+
+    /// Copies a stored instance into the local node `destination` (a C-MOVE to a local node):
+    /// needs `retrieve` and `send` on the context's node and `store` on `destination`.
+    async fn copy_instance(
+        &self,
+        context: &CallContext,
+        instance: &SopInstanceUid,
+        destination: &str,
+    ) -> Result<Ingested>;
+
+    /// Checks a permission the protocol enforces itself (e.g. `send` for a C-MOVE to a peer).
+    async fn authorize(&self, context: &CallContext, permission: Permission) -> Result<()>;
+
+    /// The caller's permissions on the context's node (empty: no access at all).
+    async fn permissions(&self, context: &CallContext) -> Result<Vec<Permission>>;
+
+    /// The configured nodes, for protocol addons to serve them.
+    async fn nodes(&self) -> Result<Vec<NodeInfo>>;
 
     /// The configured peers.
     async fn peers(&self) -> Result<Vec<Peer>>;
 
-    /// Queues a job (e.g. a send requested through a protocol front-end).
-    async fn submit_job(&self, kind: JobKind) -> Result<Job>;
+    /// Queues a job, e.g. a send requested through a protocol front-end (needs `send`).
+    async fn submit_job(&self, context: &CallContext, kind: JobKind) -> Result<Job>;
 
     /// Reports the progress of a running job; returns `false` once the job was cancelled, after
     /// which the executor should stop.

@@ -134,7 +134,7 @@ impl<H: Handler> Session<H> {
         };
         let destination = if is_move {
             let ae = command.move_destination().unwrap_or_default();
-            let Some(destination) = self.handler.destination(&ae).await else {
+            let Some(destination) = self.handler.destination(self.info.clone(), &ae).await else {
                 let status = Status::new(Status::MOVE_DESTINATION_UNKNOWN)
                     .with_comment(format!("unknown destination {ae:?}"));
                 return self.respond(command, context_id, &status).await;
@@ -146,7 +146,7 @@ impl<H: Handler> Session<H> {
         let request = RetrieveRequest {
             message_id,
             sop_class,
-            destination: destination.as_ref().map(|d| d.ae_title.clone()),
+            destination: destination.as_ref().map(|d| d.ae_title().to_owned()),
         };
         let instances = match self
             .handler
@@ -158,7 +158,7 @@ impl<H: Handler> Session<H> {
         };
         tracing::info!(
             association = %self.info.id,
-            destination = destination.as_ref().map_or("(C-GET)", |d| d.ae_title.as_str()),
+            destination = destination.as_ref().map_or("(C-GET)", Destination::ae_title),
             instances = instances.len(),
             "retrieve started"
         );
@@ -239,6 +239,71 @@ impl<H: Handler> Session<H> {
         self.send_message(context_id, &response, None).await
     }
 
+    /// Waits for a sub-operation while listening for a C-CANCEL of `message_id` (which sets
+    /// `cancelled` but lets the sub-operation finish). `None`: the peer aborted the association.
+    async fn sub_operation<F: std::future::Future>(
+        &mut self,
+        operation: F,
+        message_id: u16,
+        cancelled: &mut bool,
+    ) -> Result<Option<F::Output>, Error> {
+        tokio::pin!(operation);
+        loop {
+            let event = tokio::select! {
+                result = &mut operation => MoveEvent::Stored(result),
+                pdu = self.association.receive(), if !*cancelled => MoveEvent::Pdu(pdu),
+            };
+            match event {
+                MoveEvent::Stored(result) => return Ok(Some(result)),
+                MoveEvent::Pdu(pdu) => match pdu? {
+                    Pdu::PData { data } => *cancelled |= self.is_cancel(data, message_id)?,
+                    Pdu::AbortRQ { .. } => {
+                        self.closed = true;
+                        return Ok(None);
+                    }
+                    other => {
+                        return Err(Error::Protocol(format!(
+                            "unexpected PDU during C-MOVE: {}",
+                            other.short_description()
+                        )));
+                    }
+                },
+            }
+        }
+    }
+
+    /// C-MOVE to an AE of this handler: every instance is copied through the handler.
+    async fn copy_to(
+        &mut self,
+        destination: &str,
+        command: &Command,
+        context_id: u8,
+        message_id: u16,
+        instances: &[Instance],
+        progress: &mut Progress,
+    ) -> Result<Outcome, Error> {
+        let handler = self.handler.clone();
+        let mut cancelled = false;
+        for instance in instances {
+            if cancelled {
+                break;
+            }
+            let copy = handler.copy(self.info.clone(), instance, destination);
+            let Some(status) = self.sub_operation(copy, message_id, &mut cancelled).await? else {
+                return Ok(Outcome::Aborted);
+            };
+            progress.record(instance, &status);
+            if progress.remaining > 0 && !cancelled {
+                self.progress(command, context_id, progress).await?;
+            }
+        }
+        Ok(if cancelled {
+            Outcome::Cancelled
+        } else {
+            Outcome::Done
+        })
+    }
+
     /// C-MOVE: C-STORE sub-operations over a new association to `destination`.
     async fn move_to(
         &mut self,
@@ -252,11 +317,17 @@ impl<H: Handler> Session<H> {
         if instances.is_empty() {
             return Ok(Outcome::Done);
         }
-        let options = ScuOptions::new(
-            self.ae_title.clone(),
-            destination.ae_title.clone(),
-            destination.address.clone(),
-        );
+        let (ae_title, address) = match destination {
+            Destination::Local { ae_title } => {
+                return self
+                    .copy_to(
+                        ae_title, command, context_id, message_id, instances, progress,
+                    )
+                    .await;
+            }
+            Destination::Remote { ae_title, address } => (ae_title, address),
+        };
+        let options = ScuOptions::new(self.ae_title.clone(), ae_title.clone(), address.clone());
         let mut scu = match StoreScu::connect(&options, instances).await {
             Ok(scu) => scu,
             Err(e) if e.is_no_accepted_contexts() => {
@@ -268,7 +339,7 @@ impl<H: Handler> Session<H> {
                 return Ok(Outcome::Done);
             }
             Err(e) => {
-                tracing::warn!(association = %self.info.id, destination = %destination.ae_title, error = %e, "cannot connect to the C-MOVE destination");
+                tracing::warn!(association = %self.info.id, destination = %ae_title, error = %e, "cannot connect to the C-MOVE destination");
                 return Ok(Outcome::Refused(
                     Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS)
                         .with_comment(e.to_string()),
@@ -285,40 +356,24 @@ impl<H: Handler> Session<H> {
             if cancelled {
                 break;
             }
+            let info = self.info.clone();
             let sub_operation = async {
-                match handler.open(instance).await {
+                match handler.open(info, instance).await {
                     Ok(file) => scu.store(instance, file, Some(&originator)).await,
                     Err(status) => Ok(status),
                 }
             };
-            tokio::pin!(sub_operation);
-            let result = loop {
-                let event = tokio::select! {
-                    result = &mut sub_operation => MoveEvent::Stored(result),
-                    pdu = self.association.receive(), if !cancelled => MoveEvent::Pdu(pdu),
-                };
-                match event {
-                    MoveEvent::Stored(result) => break result,
-                    MoveEvent::Pdu(pdu) => match pdu? {
-                        Pdu::PData { data } => cancelled |= self.is_cancel(data, message_id)?,
-                        Pdu::AbortRQ { .. } => {
-                            self.closed = true;
-                            return Ok(Outcome::Aborted);
-                        }
-                        other => {
-                            return Err(Error::Protocol(format!(
-                                "unexpected PDU during C-MOVE: {}",
-                                other.short_description()
-                            )));
-                        }
-                    },
-                }
+            let Some(result) = self
+                .sub_operation(sub_operation, message_id, &mut cancelled)
+                .await?
+            else {
+                return Ok(Outcome::Aborted);
             };
             match result {
                 Ok(status) => progress.record(instance, &status),
                 Err(e) => {
                     // The destination association broke: the rest cannot be sent.
-                    tracing::warn!(association = %self.info.id, destination = %destination.ae_title, error = %e, "C-MOVE destination association failed");
+                    tracing::warn!(association = %self.info.id, destination = %ae_title, error = %e, "C-MOVE destination association failed");
                     let failure = Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS);
                     for instance in &instances[i..] {
                         progress.record(instance, &failure);
@@ -392,7 +447,7 @@ impl<H: Handler> Session<H> {
                 "no presentation context with the SCP role for this instance's SOP class and transfer syntax",
             ));
         };
-        let file = match self.handler.open(instance).await {
+        let file = match self.handler.open(self.info.clone(), instance).await {
             Ok(file) => file,
             Err(status) => return Ok(status),
         };

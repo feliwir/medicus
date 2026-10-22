@@ -79,7 +79,7 @@ impl Handler for Patients {
 async fn start(handler: Patients) -> (SocketAddr, CancellationToken) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
-    let mut options = ScpOptions::new("MEDICUS");
+    let mut options = ScpOptions::new(["MEDICUS"]);
     options.find_sop_classes =
         vec![uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND.to_owned()];
     let shutdown = CancellationToken::new();

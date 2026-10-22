@@ -21,6 +21,8 @@ pub struct Archive {
     pub(crate) index: Arc<dyn IndexStore>,
     stores: BTreeMap<String, Arc<dyn BlobStore>>,
     pub(crate) default_store: String,
+    /// Partitions writing to their own store instead of the default one.
+    partition_stores: BTreeMap<Partition, String>,
     pub(crate) policy: DuplicatePolicy,
     pub(crate) max_header_bytes: usize,
     pub(crate) extra_tags: Arc<[ExtraTag]>,
@@ -84,6 +86,7 @@ impl Archive {
             index: index.clone(),
             stores: caps.blob_stores.clone(),
             default_store: cfg.storage.clone(),
+            partition_stores: BTreeMap::new(),
             policy: cfg.duplicate_policy,
             max_header_bytes: cfg.max_header_bytes,
             extra_tags: extra_tags.into(),
@@ -91,6 +94,27 @@ impl Archive {
             capacity: cfg.capacity.clone(),
             storage_full: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    /// Routes the partitions' new instances to their own blob stores.
+    pub(crate) fn with_partition_stores(
+        mut self,
+        stores: BTreeMap<Partition, String>,
+    ) -> anyhow::Result<Self> {
+        for (partition, store) in &stores {
+            if !self.stores.contains_key(store) {
+                anyhow::bail!("partition {partition}: blob store {store:?} is not configured");
+            }
+        }
+        self.partition_stores = stores;
+        Ok(self)
+    }
+
+    /// The blob store `partition` writes new instances to.
+    pub(crate) fn store_for(&self, partition: &Partition) -> &str {
+        self.partition_stores
+            .get(partition)
+            .map_or(&self.default_store, String::as_str)
     }
 
     pub(crate) fn store(&self, name: &str) -> Result<&Arc<dyn BlobStore>> {

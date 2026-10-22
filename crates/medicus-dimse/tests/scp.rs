@@ -149,7 +149,7 @@ async fn send_data_set(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn echo_and_fragmented_store() {
-    let (addr, handler, shutdown) = start(ScpOptions::new("MEDICUS"), Status::SUCCESS).await;
+    let (addr, handler, shutdown) = start(ScpOptions::new(["MEDICUS"]), Status::SUCCESS).await;
     let mut association = connect(addr, "MEDICUS").await;
 
     let verification = context_id(&association, uids::VERIFICATION);
@@ -194,7 +194,7 @@ async fn echo_and_fragmented_store() {
 #[tokio::test(flavor = "multi_thread")]
 async fn handler_status_is_returned() {
     let (addr, _handler, shutdown) =
-        start(ScpOptions::new("MEDICUS"), Status::OUT_OF_RESOURCES).await;
+        start(ScpOptions::new(["MEDICUS"]), Status::OUT_OF_RESOURCES).await;
     let mut association = connect(addr, "MEDICUS").await;
     let ct = context_id(&association, uids::CT_IMAGE_STORAGE);
     let data_set = InstanceBuilder::new("1.2.3", "1.2.3.1", "1.2.3.1.1").build_data_set();
@@ -210,8 +210,7 @@ async fn handler_status_is_returned() {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn wrong_called_ae_is_rejected() {
-    let mut options = ScpOptions::new("MEDICUS");
-    options.require_called_ae = true;
+    let options = ScpOptions::new(["MEDICUS", "OTHER-NODE"]);
     let (addr, _handler, shutdown) = start(options, Status::SUCCESS).await;
     let result = ClientAssociationOptions::new()
         .calling_ae_title("TESTSCU")

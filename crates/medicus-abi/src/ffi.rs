@@ -38,6 +38,7 @@ pub const MD_CANCELLED: MdStatus = 7;
 pub const MD_UNSUPPORTED: MdStatus = 8;
 pub const MD_INTERNAL: MdStatus = 9;
 pub const MD_PANICKED: MdStatus = 10;
+pub const MD_PERMISSION_DENIED: MdStatus = 11;
 
 /// Capability kinds for `MdHostApi::register_capability`.
 pub const MD_CAP_BLOB_STORE: u32 = 1;
@@ -142,21 +143,25 @@ pub struct MdHostApi {
         instance: *mut c_void,
     ) -> MdStatus,
     /// Ingests a DICOM Part 10 file through the core's ingest pipeline. Takes ownership of
-    /// `data`; `origin` is the JSON event origin (e.g. `{"type": "dimse", ...}`). Result: the
-    /// JSON ingest outcome (`medicus_core::capability::host::Ingested`). Fails with
-    /// `MD_UNAVAILABLE` until the archive is ready (services are started only after that).
+    /// `data`; `context` is the JSON call context `{"node": ..., "origin": {"type": "dimse",
+    /// ...}}` (ABI 0.6). Result: the JSON ingest outcome
+    /// (`medicus_core::capability::host::Ingested`). Fails with `MD_PERMISSION_DENIED` without
+    /// the `store` permission and with `MD_UNAVAILABLE` until the archive is ready (services are
+    /// started only after that).
     pub ingest: unsafe extern "C" fn(
         ctx: *mut c_void,
         data: MdReadStream,
-        origin: MdStr,
+        context: MdStr,
         cancel: MdCancel,
         done: MdCompletion,
     ),
     /// Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
-    /// Methods: `query` (a query AST → one page of results), `locate` (a study, series or
-    /// instance → its stored instances), `peers` (`null` → the configured peers), `job_progress`
-    /// (`{"job", "progress"}` → `true`, or `false` once the job was cancelled), `submit_job` (a job
-    /// kind → the queued job). Unknown
+    /// Data methods take `{"context": ..., <arguments>}` (ABI 0.6): `query` (`query` → one page
+    /// of results), `locate` (`resource` → stored instances), `copy_instance` (`instance`,
+    /// `destination` node → ingest outcome), `authorize` (`permission`), `permissions` (→ the
+    /// caller's permissions on the node), `submit_job` (`kind` → the queued job). Others:
+    /// `nodes` and `peers` (`null` → the configured nodes / peers), `job_progress` (`{"job",
+    /// "progress"}` → `true`, or `false` once the job was cancelled). Unknown
     /// methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
     /// ready.
     pub call: unsafe extern "C" fn(
@@ -166,11 +171,11 @@ pub struct MdHostApi {
         cancel: MdCancel,
         done: MdCompletion,
     ),
-    /// Opens the Part 10 file of the stored instance with SOP Instance UID `instance`
-    /// (ABI 0.4).
+    /// Opens the Part 10 file of a stored instance; `request` is `{"context": ...,
+    /// "instance": <SOP Instance UID>}` (ABI 0.6).
     pub open_instance: unsafe extern "C" fn(
         ctx: *mut c_void,
-        instance: MdStr,
+        request: MdStr,
         cancel: MdCancel,
         done: MdStreamCompletion,
     ),
