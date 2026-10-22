@@ -12,18 +12,19 @@
 //! matched by meaning). The DICOM JSON form lets queries return extra tags without reading
 //! instance headers.
 
+use medicus_core::TagExt as _;
 use medicus_core::capability::index::{DicomJsonObject, ExtraTag, ExtraTagState, ExtraTagStatus};
 use medicus_core::query::values::{fold, normalize, sortable_lower};
 use medicus_core::query::{Attributes, MatchOptions, Matcher};
-use medicus_core::{Error, QueryLevel, Result, Tag, Vr, tags};
+use medicus_core::{Error, QueryLevel, Result, Tag, VR, tags};
 
 use crate::sql::{Dialect, Stmt};
 
 /// VRs that can be indexed as extra tags (textual or numeric values).
-pub(crate) fn supported_vr(vr: Vr) -> bool {
+pub(crate) fn supported_vr(vr: VR) -> bool {
     !matches!(
         vr,
-        Vr::SQ | Vr::OB | Vr::OD | Vr::OF | Vr::OL | Vr::OV | Vr::OW | Vr::UN
+        VR::SQ | VR::OB | VR::OD | VR::OF | VR::OL | VR::OV | VR::OW | VR::UN
     )
 }
 
@@ -52,18 +53,18 @@ pub(crate) fn validate(tags_: &[ExtraTag]) -> Result<()> {
 }
 
 /// The match form of one value, or `None` if it cannot match anything (e.g. an invalid date).
-pub(crate) fn match_form(vr: Vr, raw: &str) -> Option<String> {
+pub(crate) fn match_form(vr: VR, raw: &str) -> Option<String> {
     let v = normalize(vr, raw);
     match vr {
-        Vr::PN => Some(fold(&v)),
-        Vr::DA | Vr::TM => sortable_lower(vr, &v),
-        Vr::IS => Some(
+        VR::PN => Some(fold(&v)),
+        VR::DA | VR::TM => sortable_lower(vr, &v),
+        VR::IS => Some(
             v.trim()
                 .trim_start_matches('+')
                 .parse::<i64>()
                 .map_or(v.clone(), |n| n.to_string()),
         ),
-        Vr::DS => Some(v.trim().parse::<f64>().map_or(v.clone(), |n| n.to_string())),
+        VR::DS => Some(v.trim().parse::<f64>().map_or(v.clone(), |n| n.to_string())),
         _ => Some(v),
     }
 }
@@ -79,7 +80,7 @@ pub(crate) fn level_json(
     let mut any = false;
     for e in extras.iter().filter(|e| e.tag.level == level) {
         any = true;
-        let key = String::from(e.tag.tag);
+        let key = e.tag.tag.json_key();
         if let Some(values) = Attributes::values(attributes, e.tag.tag) {
             let forms: Vec<serde_json::Value> = values
                 .iter()
@@ -138,10 +139,10 @@ pub(crate) fn state_name(s: ExtraTagState) -> &'static str {
 pub(crate) fn compilable(t: ExtraTag, m: &Matcher, opts: &MatchOptions) -> bool {
     match m {
         Matcher::Sequence { .. } => false,
-        _ if t.vr == Vr::DT => false,
+        _ if t.vr == VR::DT => false,
         // Values are stored case-folded.
-        _ if t.vr == Vr::PN && !opts.pn_case_insensitive => false,
-        Matcher::Range { .. } => matches!(t.vr, Vr::DA | Vr::TM),
+        _ if t.vr == VR::PN && !opts.pn_case_insensitive => false,
+        Matcher::Range { .. } => matches!(t.vr, VR::DA | VR::TM),
         _ => true,
     }
 }
@@ -150,7 +151,7 @@ pub(crate) fn compilable(t: ExtraTag, m: &Matcher, opts: &MatchOptions) -> bool 
 fn exists(stmt: &mut Stmt, t: ExtraTag, cond: &mut dyn FnMut(&mut Stmt)) {
     let col = format!("{}.extra", alias(t.level));
     // The tag key is 8 hex digits, safe to embed.
-    let key = String::from(t.tag);
+    let key = t.tag.json_key();
     match stmt.dialect() {
         Dialect::Sqlite => stmt.push(&format!(
             "EXISTS (SELECT 1 FROM json_each({col}, '$.m.\"{key}\"') je WHERE "
@@ -211,7 +212,7 @@ pub(crate) fn condition(stmt: &mut Stmt, t: ExtraTag, m: &Matcher, opts: &MatchO
         }
         Matcher::Wildcard { pattern } => {
             let mut p = normalize(t.vr, pattern);
-            if t.vr == Vr::PN && opts.pn_case_insensitive {
+            if t.vr == VR::PN && opts.pn_case_insensitive {
                 p = fold(&p);
             }
             exists(stmt, t, &mut |s| {
@@ -257,7 +258,7 @@ pub(crate) fn merge_into(row: &mut DicomJsonObject, extra_json: &str, extras: &[
         return;
     };
     for (key, element) in dicom {
-        if extras.iter().any(|e| String::from(e.tag.tag) == key) {
+        if extras.iter().any(|e| e.tag.tag.json_key() == key) {
             row.insert(key, element);
         }
     }
@@ -275,13 +276,13 @@ mod tests {
     #[test]
     fn match_forms_agree_with_matcher_semantics() {
         assert_eq!(
-            match_form(Vr::DS, "1.50").unwrap(),
-            match_form(Vr::DS, " 1.5").unwrap()
+            match_form(VR::DS, "1.50").unwrap(),
+            match_form(VR::DS, " 1.5").unwrap()
         );
-        assert_eq!(match_form(Vr::IS, "+007").unwrap(), "7");
-        assert_eq!(match_form(Vr::PN, "Doe^John^^").unwrap(), "doe^john");
-        assert_eq!(match_form(Vr::DA, "2024.01.02").unwrap(), "20240102");
-        assert!(match_form(Vr::DA, "garbage").is_none());
+        assert_eq!(match_form(VR::IS, "+007").unwrap(), "7");
+        assert_eq!(match_form(VR::PN, "Doe^John^^").unwrap(), "doe^john");
+        assert_eq!(match_form(VR::DA, "2024.01.02").unwrap(), "20240102");
+        assert!(match_form(VR::DA, "garbage").is_none());
     }
 
     #[test]
@@ -291,10 +292,10 @@ mod tests {
             vr,
             level: QueryLevel::Instance,
         };
-        assert!(validate(&[t(Tag::new(0x0018, 0x0050), Vr::DS)]).is_ok());
-        assert!(validate(&[t(tags::MODALITY, Vr::CS)]).is_err());
-        assert!(validate(&[t(Tag::new(0x0040, 0x0275), Vr::SQ)]).is_err());
-        let dup = t(Tag::new(0x0018, 0x0050), Vr::DS);
+        assert!(validate(&[t(Tag(0x0018, 0x0050), VR::DS)]).is_ok());
+        assert!(validate(&[t(tags::MODALITY, VR::CS)]).is_err());
+        assert!(validate(&[t(Tag(0x0040, 0x0275), VR::SQ)]).is_err());
+        let dup = t(Tag(0x0018, 0x0050), VR::DS);
         assert!(validate(&[dup, dup]).is_err());
     }
 }

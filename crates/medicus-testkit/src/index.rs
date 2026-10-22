@@ -1,7 +1,9 @@
 //! `IndexStore` conformance suite. The index must be empty when the suite starts.
 
+use medicus_core::TagExt as _;
 use std::collections::BTreeSet;
 
+use dicom_dictionary_std::uids;
 use medicus_core::capability::IndexStore;
 use medicus_core::capability::index::{
     BlobRef, DicomJsonObject, Duplicate, DuplicatePolicy, ExtraTag, ExtraTagState, InstanceRecord,
@@ -12,26 +14,22 @@ use medicus_core::query::{DicomJson, Key, MatchOptions, OrderBy, OrderKey, Query
 use medicus_core::uid::{
     SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid, TransferSyntaxUid,
 };
-use medicus_core::{BlobKey, ErrorKind, QueryLevel, Tag, Vr, tags};
+use medicus_core::{BlobKey, ErrorKind, QueryLevel, Tag, VR, tags};
 use serde_json::{Value, json};
-
-const CT: &str = "1.2.840.10008.5.1.4.1.1.2";
-const MR: &str = "1.2.840.10008.5.1.4.1.1.4";
-const EXPLICIT_LE: &str = "1.2.840.10008.1.2.1";
 
 /// Builds DICOM JSON attributes from `(tag, value)` pairs, using the standard VRs.
 pub fn attributes(values: &[(Tag, &str)]) -> DicomJsonObject {
     let mut obj = DicomJsonObject::new();
     for (tag, v) in values {
-        let vr = tags::standard_vr(*tag).unwrap_or(Vr::LO);
+        let vr = tags::standard_vr(*tag).unwrap_or(VR::LO);
         let value = match vr {
-            Vr::PN => json!([{ "Alphabetic": v }]),
-            Vr::IS => json!([v.parse::<i64>().unwrap()]),
+            VR::PN => json!([{ "Alphabetic": v }]),
+            VR::IS => json!([v.parse::<i64>().unwrap()]),
             _ => json!([v]),
         };
         obj.insert(
-            String::from(*tag),
-            json!({ "vr": vr.as_str(), "Value": value }),
+            tag.json_key(),
+            json!({ "vr": vr.to_string(), "Value": value }),
         );
     }
     obj
@@ -57,7 +55,7 @@ pub fn record(
         series: SeriesInstanceUid::parse(series).unwrap(),
         instance: SopInstanceUid::parse(sop).unwrap(),
         sop_class: SopClassUid::parse(sop_class).unwrap(),
-        transfer_syntax: TransferSyntaxUid::parse(EXPLICIT_LE).unwrap(),
+        transfer_syntax: TransferSyntaxUid::parse(uids::EXPLICIT_VR_LITTLE_ENDIAN).unwrap(),
         attributes: attributes(&values),
         size: 1000,
         blob: BlobRef {
@@ -86,7 +84,7 @@ fn study_query(keys: &[(Tag, &str)]) -> Query {
 }
 
 fn string_values(row: &DicomJsonObject, tag: Tag) -> Vec<String> {
-    row.get(&String::from(tag))
+    row.get(&tag.json_key())
         .and_then(|e| e.get("Value"))
         .and_then(Value::as_array)
         .map(|vs| {
@@ -98,7 +96,7 @@ fn string_values(row: &DicomJsonObject, tag: Tag) -> Vec<String> {
 }
 
 fn int_value(row: &DicomJsonObject, tag: Tag) -> Option<i64> {
-    row.get(&String::from(tag))?.get("Value")?.get(0)?.as_i64()
+    row.get(&tag.json_key())?.get("Value")?.get(0)?.as_i64()
 }
 
 async fn study_uids(index: &dyn IndexStore, q: &Query) -> BTreeSet<String> {
@@ -192,9 +190,9 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
     ]
     .concat();
     for (series, sop, class, attrs) in [
-        ("1.1.1", "1.1.1.1", CT, &ct),
-        ("1.1.1", "1.1.1.2", CT, &ct),
-        ("1.1.2", "1.1.2.1", MR, &mr),
+        ("1.1.1", "1.1.1.1", uids::CT_IMAGE_STORAGE, &ct),
+        ("1.1.1", "1.1.1.2", uids::CT_IMAGE_STORAGE, &ct),
+        ("1.1.2", "1.1.2.1", uids::MR_IMAGE_STORAGE, &mr),
     ] {
         let r = record("1.1", series, sop, class, attrs);
         let out = index
@@ -250,7 +248,7 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
     assert_eq!(string_values(row, tags::MODALITIES_IN_STUDY), ["CT", "MR"]);
     assert_eq!(string_values(row, tags::SOP_CLASSES_IN_STUDY).len(), 2);
     assert_eq!(
-        row[&String::from(tags::PATIENT_NAME)]["Value"][0]["Alphabetic"],
+        row[&tags::PATIENT_NAME.json_key()]["Value"][0]["Alphabetic"],
         "Hier^Archy"
     );
 
@@ -259,7 +257,7 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
     q.keys.push(
         Key::parse(
             tags::STUDY_INSTANCE_UID,
-            Vr::UI,
+            VR::UI,
             "1.1",
             &MatchOptions::default(),
         )
@@ -290,7 +288,7 @@ async fn duplicates(index: &dyn IndexStore) {
         "1.1",
         "1.1.1",
         "1.1.1.1",
-        CT,
+        uids::CT_IMAGE_STORAGE,
         &[(tags::PATIENT_ID, "H-1"), (tags::MODALITY, "CT")],
     );
     let before = index.last_event_seq().await.unwrap();
@@ -347,7 +345,7 @@ async fn duplicates(index: &dyn IndexStore) {
     );
 
     // A series UID reused under another study is refused.
-    let clash = record("1.2", "1.1.1", "1.2.1.1", CT, &[]);
+    let clash = record("1.2", "1.1.1", "1.2.1.1", uids::CT_IMAGE_STORAGE, &[]);
     let err = index
         .store_instance(
             &clash,
@@ -427,7 +425,13 @@ async fn matching_parity(index: &dyn IndexStore) {
     let studies = parity_studies();
     let mut records = Vec::new();
     for (i, (uid, attrs)) in studies.iter().enumerate() {
-        let r = record(uid, &format!("{uid}.1"), &format!("{uid}.1.1"), CT, attrs);
+        let r = record(
+            uid,
+            &format!("{uid}.1"),
+            &format!("{uid}.1.1"),
+            uids::CT_IMAGE_STORAGE,
+            attrs,
+        );
         index
             .store_instance(
                 &r,
@@ -480,7 +484,7 @@ async fn matching_parity(index: &dyn IndexStore) {
         q.keys.push(
             Key::parse(
                 tags::STUDY_INSTANCE_UID,
-                Vr::UI,
+                VR::UI,
                 &uids,
                 &MatchOptions::default(),
             )
@@ -520,19 +524,18 @@ async fn paging_and_order(index: &dyn IndexStore) {
 }
 
 async fn unfiltered_and_level_errors(index: &dyn IndexStore) {
-    let slice_thickness = Tag::new(0x0018, 0x0050);
+    let slice_thickness = Tag(0x0018, 0x0050);
     let mut q = Query::new(QueryLevel::Instance);
     q.keys
-        .push(Key::parse(slice_thickness, Vr::DS, "1.5", &MatchOptions::default()).unwrap());
-    q.keys
-        .push(Key::universal(Tag::new(0x0028, 0x0010), Vr::US));
+        .push(Key::parse(slice_thickness, VR::DS, "1.5", &MatchOptions::default()).unwrap());
+    q.keys.push(Key::universal(Tag(0x0028, 0x0010), VR::US));
     assert_eq!(
         index.query(&q).await.unwrap().unfiltered,
         vec![slice_thickness]
     );
 
     let below = study_query(&[])
-        .with_key(Key::parse(tags::MODALITY, Vr::CS, "CT", &MatchOptions::default()).unwrap());
+        .with_key(Key::parse(tags::MODALITY, VR::CS, "CT", &MatchOptions::default()).unwrap());
     assert_eq!(
         index.query(&below).await.unwrap_err().kind,
         ErrorKind::InvalidArgument
@@ -608,7 +611,7 @@ async fn deletion(index: &dyn IndexStore) {
     let mut patients = Query::new(QueryLevel::Patient);
     patients
         .keys
-        .push(Key::parse(tags::PATIENT_ID, Vr::LO, "H-1", &MatchOptions::default()).unwrap());
+        .push(Key::parse(tags::PATIENT_ID, VR::LO, "H-1", &MatchOptions::default()).unwrap());
     assert!(
         index.query(&patients).await.unwrap().rows.is_empty(),
         "empty patient removed"
@@ -617,7 +620,7 @@ async fn deletion(index: &dyn IndexStore) {
     // Patient level: P1 has two studies.
     let mut p1 = Query::new(QueryLevel::Patient);
     p1.keys
-        .push(Key::parse(tags::PATIENT_ID, Vr::LO, "P1", &MatchOptions::default()).unwrap());
+        .push(Key::parse(tags::PATIENT_ID, VR::LO, "P1", &MatchOptions::default()).unwrap());
     let rows = index.query(&p1).await.unwrap().rows;
     assert_eq!(
         int_value(&rows[0], tags::NUMBER_OF_PATIENT_RELATED_STUDIES),
@@ -626,59 +629,59 @@ async fn deletion(index: &dyn IndexStore) {
 }
 
 /// Adds an attribute with an explicit VR (for non-standard tags) to a record.
-pub fn with_attribute(mut r: InstanceRecord, tag: Tag, vr: Vr, values: &[&str]) -> InstanceRecord {
+pub fn with_attribute(mut r: InstanceRecord, tag: Tag, vr: VR, values: &[&str]) -> InstanceRecord {
     let vals: Vec<Value> = values
         .iter()
         .map(|v| match vr {
-            Vr::PN => json!({ "Alphabetic": v }),
-            Vr::IS | Vr::DS => v.parse::<f64>().map_or_else(|_| json!(v), |n| json!(n)),
+            VR::PN => json!({ "Alphabetic": v }),
+            VR::IS | VR::DS => v.parse::<f64>().map_or_else(|_| json!(v), |n| json!(n)),
             _ => json!(v),
         })
         .collect();
     r.attributes.insert(
-        String::from(tag),
-        json!({ "vr": vr.as_str(), "Value": vals }),
+        tag.json_key(),
+        json!({ "vr": vr.to_string(), "Value": vals }),
     );
     r
 }
 
-const SLICE_THICKNESS: Tag = Tag::new(0x0018, 0x0050);
-const IMAGE_TYPE: Tag = Tag::new(0x0008, 0x0008);
-const ACQUISITION_DATE: Tag = Tag::new(0x0008, 0x0022);
-const PROTOCOL_NAME: Tag = Tag::new(0x0018, 0x1030);
-const OPERATORS_NAME: Tag = Tag::new(0x0008, 0x1070);
+const SLICE_THICKNESS: Tag = Tag(0x0018, 0x0050);
+const IMAGE_TYPE: Tag = Tag(0x0008, 0x0008);
+const ACQUISITION_DATE: Tag = Tag(0x0008, 0x0022);
+const PROTOCOL_NAME: Tag = Tag(0x0018, 0x1030);
+const OPERATORS_NAME: Tag = Tag(0x0008, 0x1070);
 
 fn extra_config() -> Vec<ExtraTag> {
     vec![
         ExtraTag {
             tag: SLICE_THICKNESS,
-            vr: Vr::DS,
+            vr: VR::DS,
             level: QueryLevel::Instance,
         },
         ExtraTag {
             tag: IMAGE_TYPE,
-            vr: Vr::CS,
+            vr: VR::CS,
             level: QueryLevel::Instance,
         },
         ExtraTag {
             tag: ACQUISITION_DATE,
-            vr: Vr::DA,
+            vr: VR::DA,
             level: QueryLevel::Instance,
         },
         ExtraTag {
             tag: PROTOCOL_NAME,
-            vr: Vr::LO,
+            vr: VR::LO,
             level: QueryLevel::Series,
         },
         ExtraTag {
             tag: OPERATORS_NAME,
-            vr: Vr::PN,
+            vr: VR::PN,
             level: QueryLevel::Series,
         },
     ]
 }
 
-fn instance_query(keys: &[(Tag, Vr, &str)]) -> Query {
+fn instance_query(keys: &[(Tag, VR, &str)]) -> Query {
     keys.iter()
         .fold(Query::new(QueryLevel::Instance), |q, (tag, vr, v)| {
             q.with_key(Key::parse(*tag, *vr, v, &MatchOptions::default()).unwrap())
@@ -693,9 +696,9 @@ pub async fn extra_tags_on_empty_index(index: &dyn IndexStore) {
         "{status:?}"
     );
     let r = with_attribute(
-        record("8.1", "8.1.1", "8.1.1.1", CT, &[]),
+        record("8.1", "8.1.1", "8.1.1.1", uids::CT_IMAGE_STORAGE, &[]),
         SLICE_THICKNESS,
-        Vr::DS,
+        VR::DS,
         &["2.5"],
     );
     index
@@ -706,13 +709,13 @@ pub async fn extra_tags_on_empty_index(index: &dyn IndexStore) {
         )
         .await
         .unwrap();
-    let q = instance_query(&[(SLICE_THICKNESS, Vr::DS, "2.50")]);
+    let q = instance_query(&[(SLICE_THICKNESS, VR::DS, "2.50")]);
     let res = index.query(&q).await.unwrap();
     assert!(res.unfiltered.is_empty());
     assert_eq!(res.rows.len(), 1);
     // Extra tags are returned in their original DICOM JSON form.
     assert_eq!(
-        res.rows[0][&String::from(SLICE_THICKNESS)],
+        res.rows[0][&SLICE_THICKNESS.json_key()],
         json!({ "vr": "DS", "Value": [2.5] })
     );
 }
@@ -721,7 +724,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     // Configuration errors.
     let standard = ExtraTag {
         tag: tags::MODALITY,
-        vr: Vr::CS,
+        vr: VR::CS,
         level: QueryLevel::Series,
     };
     assert_eq!(
@@ -739,7 +742,7 @@ async fn extra_tags(index: &dyn IndexStore) {
         status.iter().all(|s| s.state == ExtraTagState::Backfilling),
         "{status:?}"
     );
-    let q = instance_query(&[(SLICE_THICKNESS, Vr::DS, "1.5")]);
+    let q = instance_query(&[(SLICE_THICKNESS, VR::DS, "1.5")]);
     assert_eq!(
         index.query(&q).await.unwrap().unfiltered,
         vec![SLICE_THICKNESS]
@@ -749,7 +752,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     }
     assert_eq!(
         index
-            .mark_extra_ready(Tag::new(0x0011, 0x0011))
+            .mark_extra_ready(Tag(0x0011, 0x0011))
             .await
             .unwrap_err()
             .kind,
@@ -766,12 +769,18 @@ async fn extra_tags(index: &dyn IndexStore) {
               date: &str,
               protocol: &str,
               op: &str| {
-        let r = record("7.1", series, sop, CT, &[(tags::PATIENT_ID, "X7")]);
-        let r = with_attribute(r, SLICE_THICKNESS, Vr::DS, &[thick]);
-        let r = with_attribute(r, IMAGE_TYPE, Vr::CS, types);
-        let r = with_attribute(r, ACQUISITION_DATE, Vr::DA, &[date]);
-        let r = with_attribute(r, PROTOCOL_NAME, Vr::LO, &[protocol]);
-        with_attribute(r, OPERATORS_NAME, Vr::PN, &[op])
+        let r = record(
+            "7.1",
+            series,
+            sop,
+            uids::CT_IMAGE_STORAGE,
+            &[(tags::PATIENT_ID, "X7")],
+        );
+        let r = with_attribute(r, SLICE_THICKNESS, VR::DS, &[thick]);
+        let r = with_attribute(r, IMAGE_TYPE, VR::CS, types);
+        let r = with_attribute(r, ACQUISITION_DATE, VR::DA, &[date]);
+        let r = with_attribute(r, PROTOCOL_NAME, VR::LO, &[protocol]);
+        with_attribute(r, OPERATORS_NAME, VR::PN, &[op])
     };
     let records = vec![
         mk(
@@ -813,21 +822,21 @@ async fn extra_tags(index: &dyn IndexStore) {
             .unwrap();
     }
 
-    let queries: Vec<Vec<(Tag, Vr, &str)>> = vec![
-        vec![(SLICE_THICKNESS, Vr::DS, "1.5")],
-        vec![(SLICE_THICKNESS, Vr::DS, "5.0")],
-        vec![(IMAGE_TYPE, Vr::CS, "PRIMARY")],
-        vec![(IMAGE_TYPE, Vr::CS, "LOCALIZER\\AXIAL")],
-        vec![(IMAGE_TYPE, Vr::CS, "*ARY")],
-        vec![(ACQUISITION_DATE, Vr::DA, "20240101-")],
-        vec![(ACQUISITION_DATE, Vr::DA, "-20231231")],
-        vec![(PROTOCOL_NAME, Vr::LO, "Chest*")],
-        vec![(PROTOCOL_NAME, Vr::LO, "*[low dose]")],
-        vec![(OPERATORS_NAME, Vr::PN, "smith^anna")],
-        vec![(OPERATORS_NAME, Vr::PN, "B*")],
+    let queries: Vec<Vec<(Tag, VR, &str)>> = vec![
+        vec![(SLICE_THICKNESS, VR::DS, "1.5")],
+        vec![(SLICE_THICKNESS, VR::DS, "5.0")],
+        vec![(IMAGE_TYPE, VR::CS, "PRIMARY")],
+        vec![(IMAGE_TYPE, VR::CS, "LOCALIZER\\AXIAL")],
+        vec![(IMAGE_TYPE, VR::CS, "*ARY")],
+        vec![(ACQUISITION_DATE, VR::DA, "20240101-")],
+        vec![(ACQUISITION_DATE, VR::DA, "-20231231")],
+        vec![(PROTOCOL_NAME, VR::LO, "Chest*")],
+        vec![(PROTOCOL_NAME, VR::LO, "*[low dose]")],
+        vec![(OPERATORS_NAME, VR::PN, "smith^anna")],
+        vec![(OPERATORS_NAME, VR::PN, "B*")],
         vec![
-            (SLICE_THICKNESS, Vr::DS, "1.5"),
-            (IMAGE_TYPE, Vr::CS, "DERIVED"),
+            (SLICE_THICKNESS, VR::DS, "1.5"),
+            (IMAGE_TYPE, VR::CS, "DERIVED"),
         ],
     ];
     let instances = records
@@ -841,7 +850,7 @@ async fn extra_tags(index: &dyn IndexStore) {
         q.keys.push(
             Key::parse(
                 tags::SOP_INSTANCE_UID,
-                Vr::UI,
+                VR::UI,
                 &instances,
                 &MatchOptions::default(),
             )
@@ -878,7 +887,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     // Series-level extra tags are usable at series level; instance-level ones are not.
     let mut sq = Query::new(QueryLevel::Series);
     sq.keys
-        .push(Key::parse(PROTOCOL_NAME, Vr::LO, "Scout*", &MatchOptions::default()).unwrap());
+        .push(Key::parse(PROTOCOL_NAME, VR::LO, "Scout*", &MatchOptions::default()).unwrap());
     let rows = index.query(&sq).await.unwrap().rows;
     assert_eq!(
         rows.iter()
@@ -888,7 +897,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     );
     let mut bad = Query::new(QueryLevel::Series);
     bad.keys
-        .push(Key::parse(SLICE_THICKNESS, Vr::DS, "1", &MatchOptions::default()).unwrap());
+        .push(Key::parse(SLICE_THICKNESS, VR::DS, "1", &MatchOptions::default()).unwrap());
     assert_eq!(
         index.query(&bad).await.unwrap_err().kind,
         ErrorKind::InvalidArgument
@@ -897,15 +906,15 @@ async fn extra_tags(index: &dyn IndexStore) {
     // Backfill an instance stored before the tags were configured.
     let old = SopInstanceUid::parse("2.1.1.1").unwrap();
     let attrs = with_attribute(
-        record("2.1", "2.1.1", "2.1.1.1", CT, &[]),
+        record("2.1", "2.1.1", "2.1.1.1", uids::CT_IMAGE_STORAGE, &[]),
         SLICE_THICKNESS,
-        Vr::DS,
+        VR::DS,
         &["9"],
     )
     .attributes;
     index.update_extra(&old, &attrs).await.unwrap();
     let rows = index
-        .query(&instance_query(&[(SLICE_THICKNESS, Vr::DS, "9")]))
+        .query(&instance_query(&[(SLICE_THICKNESS, VR::DS, "9")]))
         .await
         .unwrap()
         .rows;
@@ -926,7 +935,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     one.keys.push(
         Key::parse(
             tags::SOP_INSTANCE_UID,
-            Vr::UI,
+            VR::UI,
             "7.1.2.1",
             &MatchOptions::default(),
         )
@@ -934,14 +943,14 @@ async fn extra_tags(index: &dyn IndexStore) {
     );
     let row = &index.query(&one).await.unwrap().rows[0];
     assert_eq!(
-        row[&String::from(IMAGE_TYPE)]["Value"],
+        row[&IMAGE_TYPE.json_key()]["Value"],
         json!(["ORIGINAL", "PRIMARY", "LOCALIZER"])
     );
     assert_eq!(
-        row[&String::from(OPERATORS_NAME)]["Value"][0]["Alphabetic"],
+        row[&OPERATORS_NAME.json_key()]["Value"][0]["Alphabetic"],
         "Brown^Bob"
     );
-    assert_eq!(row[&String::from(PROTOCOL_NAME)]["vr"], "LO");
+    assert_eq!(row[&PROTOCOL_NAME.json_key()]["vr"], "LO");
 
     // Removing a tag from the configuration makes queries on it unfiltered again.
     index
@@ -954,7 +963,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     );
     let row = &index.query(&one).await.unwrap().rows[0];
     assert!(
-        !row.contains_key(&String::from(SLICE_THICKNESS)),
+        !row.contains_key(&SLICE_THICKNESS.json_key()),
         "dropped tags are not returned"
     );
 }

@@ -4,7 +4,7 @@
 //! vocabulary shared by the core server and all addons:
 //!
 //! - validated identifiers ([`uid`], [`AeTitle`], [`BlobKey`]),
-//! - DICOM attribute addressing ([`Tag`], [`Vr`]) and the standard query keys ([`tags`]),
+//! - DICOM attribute addressing ([`Tag`], [`VR`]) and the standard query keys ([`tags`]),
 //! - the backend-neutral [`query`] model implementing PS3.4 C.2.2.2 matching,
 //! - the versioned [`event`] envelope.
 //!
@@ -24,4 +24,4 @@ pub use ae::AeTitle;
 pub use blob::BlobKey;
 pub use error::{Error, ErrorKind, Result};
 pub use level::QueryLevel;
-pub use tag::{Tag, Vr, tags};
+pub use tag::{Tag, TagExt, VR, VrExt, tags};

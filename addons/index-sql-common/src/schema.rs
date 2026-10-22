@@ -3,7 +3,7 @@
 //! Table aliases used in all generated SQL: `p` patients, `st` studies, `se` series,
 //! `i` instances.
 
-use medicus_core::{QueryLevel, Tag, Vr, tags};
+use medicus_core::{QueryLevel, Tag, VR, tags};
 
 /// How an attribute is stored and therefore matched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -28,7 +28,7 @@ pub enum Storage {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Column {
     pub tag: Tag,
-    pub vr: Vr,
+    pub vr: VR,
     pub level: QueryLevel,
     /// Table alias.
     pub alias: &'static str,
@@ -48,7 +48,7 @@ macro_rules! columns {
         pub const COLUMNS: &[Column] = &[
             $(Column {
                 tag: tags::$tag,
-                vr: match tags::standard_vr(tags::$tag) { Some(vr) => vr, None => Vr::UN },
+                vr: match tags::standard_vr(tags::$tag) { Some(vr) => vr, None => VR::UN },
                 level: QueryLevel::$level,
                 alias: $alias,
                 column: $col,
@@ -166,8 +166,9 @@ mod tests {
     #[test]
     fn every_standard_attribute_is_mapped_once_with_its_vr_and_level() {
         for a in tags::STANDARD {
-            let c = column(a.tag).unwrap_or_else(|| panic!("{} not mapped", a.keyword));
-            assert_eq!((c.vr, c.level), (a.vr, a.level), "{}", a.keyword);
+            let name = medicus_core::tag::Named(a.tag);
+            let c = column(a.tag).unwrap_or_else(|| panic!("{name} not mapped"));
+            assert_eq!((c.vr, c.level), (a.vr, a.level), "{name}");
         }
         assert_eq!(COLUMNS.len(), tags::STANDARD.len());
     }

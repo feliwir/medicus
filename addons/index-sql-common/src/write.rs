@@ -8,7 +8,7 @@ use medicus_core::event::Event;
 use medicus_core::query::Attributes;
 use medicus_core::query::values::{fold, normalize, sortable_lower};
 use medicus_core::uid::Uid;
-use medicus_core::{BlobKey, Error, ErrorKind, QueryLevel, Result, Tag, Vr, tags};
+use medicus_core::{BlobKey, Error, ErrorKind, QueryLevel, Result, Tag, VR, tags};
 use time::OffsetDateTime;
 
 use crate::extra;
@@ -20,7 +20,7 @@ pub(crate) fn micros(t: OffsetDateTime) -> i64 {
 }
 
 /// The first value of `tag` in the record's attributes, normalized for storage.
-fn first_value(record: &InstanceRecord, tag: Tag, vr: Vr) -> Option<String> {
+fn first_value(record: &InstanceRecord, tag: Tag, vr: VR) -> Option<String> {
     let values = Attributes::values(&record.attributes, tag)?;
     let v = normalize(vr, values.first()?);
     (!v.is_empty()).then_some(v)
@@ -47,13 +47,13 @@ fn level_values(
             Storage::Date => {
                 out.push((
                     c.column.to_owned(),
-                    v.and_then(|v| sortable_lower(Vr::DA, &v)).into(),
+                    v.and_then(|v| sortable_lower(VR::DA, &v)).into(),
                 ));
             }
             Storage::Time { key } => {
                 out.push((
                     key.to_owned(),
-                    v.as_deref().and_then(|v| sortable_lower(Vr::TM, v)).into(),
+                    v.as_deref().and_then(|v| sortable_lower(VR::TM, v)).into(),
                 ));
                 out.push((c.column.to_owned(), v.into()));
             }
@@ -304,8 +304,8 @@ async fn upsert_hierarchy<T: Tx>(
     now: i64,
 ) -> Result<i64> {
     let d = tx.dialect();
-    let patient_id = first_value(record, tags::PATIENT_ID, Vr::LO).unwrap_or_default();
-    let issuer = first_value(record, tags::ISSUER_OF_PATIENT_ID, Vr::LO).unwrap_or_default();
+    let patient_id = first_value(record, tags::PATIENT_ID, VR::LO).unwrap_or_default();
+    let issuer = first_value(record, tags::ISSUER_OF_PATIENT_ID, VR::LO).unwrap_or_default();
     let mut patient_cols = level_values(record, QueryLevel::Patient, extras);
     patient_cols.retain(|(n, _)| n != "patient_id" && n != "issuer");
     let mut s = Stmt::new(d);

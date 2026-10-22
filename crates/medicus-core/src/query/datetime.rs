@@ -180,9 +180,9 @@ pub(crate) fn datetime(raw: &str) -> Option<Interval> {
 
 /// Canonical, lexically sortable text of an interval bound, for storage in an index:
 /// DA → `YYYYMMDD`, TM → `HHMMSSffffff` (µs). Lexical order equals chronological order.
-pub(crate) fn sortable(vr: crate::Vr, raw: &str, upper: bool) -> Option<String> {
+pub(crate) fn sortable(vr: crate::VR, raw: &str, upper: bool) -> Option<String> {
     match vr {
-        crate::Vr::DA => {
+        crate::VR::DA => {
             let i = date(raw)?;
             let jd = i32::try_from(if upper { i.hi } else { i.lo }).ok()?;
             let d = Date::from_julian_day(jd).ok()?;
@@ -193,7 +193,7 @@ pub(crate) fn sortable(vr: crate::Vr, raw: &str, upper: bool) -> Option<String> 
                 d.day()
             ))
         }
-        crate::Vr::TM => {
+        crate::VR::TM => {
             let i = time(raw)?;
             let us = if upper { i.hi } else { i.lo };
             let (h, rest) = (us / (3600 * US_PER_SEC), us % (3600 * US_PER_SEC));
@@ -255,18 +255,18 @@ mod tests {
 
     #[test]
     fn sortable_forms() {
-        use crate::Vr;
-        assert_eq!(sortable(Vr::DA, "2024.03.15", false).unwrap(), "20240315");
-        assert_eq!(sortable(Vr::TM, "10", false).unwrap(), "100000000000");
-        assert_eq!(sortable(Vr::TM, "10", true).unwrap(), "105959999999");
+        use crate::VR;
+        assert_eq!(sortable(VR::DA, "2024.03.15", false).unwrap(), "20240315");
+        assert_eq!(sortable(VR::TM, "10", false).unwrap(), "100000000000");
+        assert_eq!(sortable(VR::TM, "10", true).unwrap(), "105959999999");
         assert_eq!(
-            sortable(Vr::TM, "10:15:30.5", false).unwrap(),
+            sortable(VR::TM, "10:15:30.5", false).unwrap(),
             "101530500000"
         );
         assert!(
-            sortable(Vr::TM, "1015", false).unwrap() < sortable(Vr::TM, "101530", false).unwrap()
+            sortable(VR::TM, "1015", false).unwrap() < sortable(VR::TM, "101530", false).unwrap()
         );
-        assert!(sortable(Vr::DT, "2024", false).is_none());
+        assert!(sortable(VR::DT, "2024", false).is_none());
     }
 
     #[test]

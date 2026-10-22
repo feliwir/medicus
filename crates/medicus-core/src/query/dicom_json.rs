@@ -1,5 +1,6 @@
 //! [`Attributes`] over the DICOM JSON model (PS3.18 Annex F).
 
+use crate::TagExt as _;
 use std::borrow::Cow;
 
 use serde_json::{Map, Value};
@@ -28,7 +29,7 @@ impl Attributes for DicomJson<'_> {
 }
 
 fn element(map: &Map<String, Value>, tag: Tag) -> Option<&Map<String, Value>> {
-    map.get(&String::from(tag)).and_then(Value::as_object)
+    map.get(&tag.json_key()).and_then(Value::as_object)
 }
 
 /// Person names are objects with up to three component groups (F.2.2).
@@ -83,14 +84,14 @@ mod tests {
         });
         let d = DicomJson::new(v.as_object().unwrap());
         assert_eq!(
-            d.values(Tag::new(0x0010, 0x0010)).unwrap(),
+            d.values(Tag(0x0010, 0x0010)).unwrap(),
             vec!["Yamada^Tarou=山田^太郎"]
         );
-        assert_eq!(d.values(Tag::new(0x0028, 0x0010)).unwrap(), vec!["512"]);
+        assert_eq!(d.values(Tag(0x0028, 0x0010)).unwrap(), vec!["512"]);
         assert_eq!(
-            d.values(Tag::new(0x0008, 0x1030)).unwrap(),
+            d.values(Tag(0x0008, 0x1030)).unwrap(),
             Vec::<Cow<'_, str>>::new()
         );
-        assert!(d.values(Tag::new(0x0008, 0x0050)).is_none());
+        assert!(d.values(Tag(0x0008, 0x0050)).is_none());
     }
 }

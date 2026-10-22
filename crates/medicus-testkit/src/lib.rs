@@ -14,6 +14,7 @@
 )]
 
 pub mod blob;
+pub mod dicom;
 pub mod index;
 
 use bytes::Bytes;

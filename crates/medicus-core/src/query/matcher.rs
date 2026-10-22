@@ -1,12 +1,13 @@
 //! Matching of a single key attribute (PS3.4 C.2.2.2).
 
+use crate::VrExt as _;
 use std::borrow::Cow;
 
 use serde::{Deserialize, Serialize};
 
 use super::datetime::{self, Interval};
 use super::{Attributes, Key, MatchOptions, QueryError};
-use crate::Vr;
+use crate::VR;
 
 /// How a key attribute is matched. Built with [`Matcher::parse`] from the encoded key value of a
 /// C-FIND identifier or QIDO-RS query parameter.
@@ -43,8 +44,8 @@ impl Matcher {
     /// Classifies an encoded key value according to PS3.4 C.2.2.2.
     ///
     /// Sequence keys cannot be expressed as a string; build [`Matcher::Sequence`] directly.
-    pub fn parse(vr: Vr, raw: &str, options: &MatchOptions) -> Result<Self, QueryError> {
-        if vr == Vr::SQ {
+    pub fn parse(vr: VR, raw: &str, options: &MatchOptions) -> Result<Self, QueryError> {
+        if vr == VR::SQ {
             return Err(QueryError::SequenceNotString);
         }
         let value = normalize(vr, raw);
@@ -54,7 +55,7 @@ impl Matcher {
         if options.empty_value_matching && value == "\"\"" && vr.supports_empty_value_matching() {
             return Ok(Self::Empty);
         }
-        if vr == Vr::UI {
+        if vr == VR::UI {
             let uids: Vec<String> = value.split('\\').map(|u| normalize(vr, u)).collect();
             if uids.iter().any(String::is_empty) {
                 return Err(QueryError::InvalidValue {
@@ -127,7 +128,7 @@ impl Matcher {
                 .iter()
                 .all(|k| values.iter().any(|v| single_eq(vr, k, v, opt))),
             Self::Wildcard { pattern } => {
-                let fold = vr == Vr::PN && opt.pn_case_insensitive;
+                let fold = vr == VR::PN && opt.pn_case_insensitive;
                 values.iter().any(|v| wildcard(pattern, v, fold))
             }
             Self::Range { from, to } => {
@@ -145,14 +146,14 @@ impl Matcher {
 
 /// Removes insignificant padding: trailing spaces (and NUL for UI); leading spaces except for text
 /// VRs where they are significant. PN values additionally drop trailing empty components.
-pub(crate) fn normalize(vr: Vr, raw: &str) -> String {
+pub(crate) fn normalize(vr: VR, raw: &str) -> String {
     let s = raw.trim_end_matches([' ', '\0']);
     let s = if vr.leading_space_significant() {
         s
     } else {
         s.trim_start_matches(' ')
     };
-    if vr == Vr::PN {
+    if vr == VR::PN {
         return s
             .split('=')
             .map(|group| group.trim_end_matches(['^', ' ']))
@@ -164,20 +165,20 @@ pub(crate) fn normalize(vr: Vr, raw: &str) -> String {
     s.to_owned()
 }
 
-fn interval(vr: Vr, v: &str) -> Option<Interval> {
+fn interval(vr: VR, v: &str) -> Option<Interval> {
     match vr {
-        Vr::DA => datetime::date(v),
-        Vr::TM => datetime::time(v),
-        Vr::DT => datetime::datetime(v),
+        VR::DA => datetime::date(v),
+        VR::TM => datetime::time(v),
+        VR::DT => datetime::datetime(v),
         _ => None,
     }
 }
 
-fn validate_single(vr: Vr, v: &str) -> Result<(), QueryError> {
+fn validate_single(vr: VR, v: &str) -> Result<(), QueryError> {
     let ok = match vr {
-        Vr::DA | Vr::TM | Vr::DT => interval(vr, v).is_some(),
-        Vr::IS => v.trim().parse::<i64>().is_ok(),
-        Vr::DS => v.trim().parse::<f64>().is_ok(),
+        VR::DA | VR::TM | VR::DT => interval(vr, v).is_some(),
+        VR::IS => v.trim().parse::<i64>().is_ok(),
+        VR::DS => v.trim().parse::<f64>().is_ok(),
         _ => true,
     };
     if ok {
@@ -190,7 +191,7 @@ fn validate_single(vr: Vr, v: &str) -> Result<(), QueryError> {
     }
 }
 
-fn parse_range(vr: Vr, value: &str) -> Result<Matcher, QueryError> {
+fn parse_range(vr: VR, value: &str) -> Result<Matcher, QueryError> {
     let invalid = || QueryError::InvalidValue {
         vr,
         value: value.to_owned(),
@@ -229,7 +230,7 @@ fn parse_range(vr: Vr, value: &str) -> Result<Matcher, QueryError> {
     }
     // Strictly, PS3.4 C.2.2.2.1.3 Note 3 says a negative UTC offset cannot be used with Single
     // Value Matching. We accept it leniently, e.g. "20240101120000-0500".
-    if vr == Vr::DT && interval(vr, value).is_some() {
+    if vr == VR::DT && interval(vr, value).is_some() {
         return Ok(Matcher::Single {
             value: value.to_owned(),
         });
@@ -242,22 +243,22 @@ fn parse_range(vr: Vr, value: &str) -> Result<Matcher, QueryError> {
     Err(invalid())
 }
 
-fn single_eq(vr: Vr, key: &str, value: &str, opt: &MatchOptions) -> bool {
+fn single_eq(vr: VR, key: &str, value: &str, opt: &MatchOptions) -> bool {
     match vr {
-        Vr::DA | Vr::TM | Vr::DT => match (interval(vr, key), interval(vr, value)) {
+        VR::DA | VR::TM | VR::DT => match (interval(vr, key), interval(vr, value)) {
             (Some(k), Some(v)) => k.lo == v.lo,
             _ => false,
         },
-        Vr::IS => match (key.trim().parse::<i64>(), value.trim().parse::<i64>()) {
+        VR::IS => match (key.trim().parse::<i64>(), value.trim().parse::<i64>()) {
             (Ok(k), Ok(v)) => k == v,
             _ => key == value,
         },
         #[allow(clippy::float_cmp)] // exact numeric identity is the intended semantics
-        Vr::DS => match (key.trim().parse::<f64>(), value.trim().parse::<f64>()) {
+        VR::DS => match (key.trim().parse::<f64>(), value.trim().parse::<f64>()) {
             (Ok(k), Ok(v)) => k == v,
             _ => key == value,
         },
-        Vr::PN if opt.pn_case_insensitive => fold(key) == fold(value),
+        VR::PN if opt.pn_case_insensitive => fold(key) == fold(value),
         _ => key == value,
     }
 }
@@ -305,58 +306,58 @@ mod tests {
     use super::*;
     use proptest::prelude::*;
 
-    fn parse(vr: Vr, s: &str) -> Matcher {
+    fn parse(vr: VR, s: &str) -> Matcher {
         Matcher::parse(vr, s, &MatchOptions::default()).unwrap()
     }
 
     #[test]
     fn classification() {
-        assert_eq!(parse(Vr::PN, ""), Matcher::Universal);
-        assert_eq!(parse(Vr::PN, "  "), Matcher::Universal);
-        assert_eq!(parse(Vr::PN, "*"), Matcher::Universal);
+        assert_eq!(parse(VR::PN, ""), Matcher::Universal);
+        assert_eq!(parse(VR::PN, "  "), Matcher::Universal);
+        assert_eq!(parse(VR::PN, "*"), Matcher::Universal);
         assert_eq!(
-            parse(Vr::PN, "Doe*"),
+            parse(VR::PN, "Doe*"),
             Matcher::Wildcard {
                 pattern: "Doe*".into()
             }
         );
         assert_eq!(
-            parse(Vr::UI, "1.2\\1.3"),
+            parse(VR::UI, "1.2\\1.3"),
             Matcher::UidList {
                 uids: vec!["1.2".into(), "1.3".into()]
             }
         );
         assert_eq!(
-            parse(Vr::UI, "1.2\0"),
+            parse(VR::UI, "1.2\0"),
             Matcher::Single {
                 value: "1.2".into()
             }
         );
         assert_eq!(
-            parse(Vr::DA, "20240101-"),
+            parse(VR::DA, "20240101-"),
             Matcher::Range {
                 from: Some("20240101".into()),
                 to: None
             }
         );
         assert_eq!(
-            parse(Vr::DA, "-20240101"),
+            parse(VR::DA, "-20240101"),
             Matcher::Range {
                 from: None,
                 to: Some("20240101".into())
             }
         );
         assert_eq!(
-            parse(Vr::CS, "CT\\MR"),
+            parse(VR::CS, "CT\\MR"),
             Matcher::AnyOf {
                 values: vec!["CT".into(), "MR".into()]
             }
         );
         // wildcards are not special for UI or DA
-        assert!(Matcher::parse(Vr::DA, "2024*", &MatchOptions::default()).is_err());
+        assert!(Matcher::parse(VR::DA, "2024*", &MatchOptions::default()).is_err());
         // empty value matching only when negotiated
         assert_eq!(
-            parse(Vr::LO, "\"\""),
+            parse(VR::LO, "\"\""),
             Matcher::Single {
                 value: "\"\"".into()
             }
@@ -366,7 +367,7 @@ mod tests {
             ..MatchOptions::default()
         };
         assert_eq!(
-            Matcher::parse(Vr::LO, "\"\"", &opts).unwrap(),
+            Matcher::parse(VR::LO, "\"\"", &opts).unwrap(),
             Matcher::Empty
         );
         let opts = MatchOptions {
@@ -374,7 +375,7 @@ mod tests {
             ..MatchOptions::default()
         };
         assert_eq!(
-            Matcher::parse(Vr::CS, "CT\\MR", &opts).unwrap(),
+            Matcher::parse(VR::CS, "CT\\MR", &opts).unwrap(),
             Matcher::AllOf {
                 values: vec!["CT".into(), "MR".into()]
             }
@@ -384,28 +385,28 @@ mod tests {
     #[test]
     fn invalid_ranges() {
         let o = MatchOptions::default();
-        assert!(Matcher::parse(Vr::DA, "-", &o).is_err());
-        assert!(Matcher::parse(Vr::DA, "20240102-20240101", &o).is_err());
-        assert!(Matcher::parse(Vr::DA, "2024-01-01", &o).is_err());
+        assert!(Matcher::parse(VR::DA, "-", &o).is_err());
+        assert!(Matcher::parse(VR::DA, "20240102-20240101", &o).is_err());
+        assert!(Matcher::parse(VR::DA, "2024-01-01", &o).is_err());
     }
 
     #[test]
     fn datetime_ranges_with_offsets() {
         assert_eq!(
-            parse(Vr::DT, "20240101120000-0500-20240102"),
+            parse(VR::DT, "20240101120000-0500-20240102"),
             Matcher::Range {
                 from: Some("20240101120000-0500".into()),
                 to: Some("20240102".into())
             }
         );
         assert_eq!(
-            parse(Vr::DT, "20240101120000-0500"),
+            parse(VR::DT, "20240101120000-0500"),
             Matcher::Single {
                 value: "20240101120000-0500".into()
             }
         );
         assert_eq!(
-            parse(Vr::DT, "2024-2025"),
+            parse(VR::DT, "2024-2025"),
             Matcher::Range {
                 from: Some("2024".into()),
                 to: Some("2025".into())
@@ -428,10 +429,10 @@ mod tests {
 
     #[test]
     fn pn_normalization() {
-        assert_eq!(normalize(Vr::PN, "Doe^John^^^"), "Doe^John");
-        assert_eq!(normalize(Vr::PN, "Doe^John^^=^^"), "Doe^John");
-        assert_eq!(normalize(Vr::LT, "  text  "), "  text");
-        assert_eq!(normalize(Vr::LO, "  text  "), "text");
+        assert_eq!(normalize(VR::PN, "Doe^John^^^"), "Doe^John");
+        assert_eq!(normalize(VR::PN, "Doe^John^^=^^"), "Doe^John");
+        assert_eq!(normalize(VR::LT, "  text  "), "  text");
+        assert_eq!(normalize(VR::LO, "  text  "), "text");
     }
 
     proptest! {
@@ -446,7 +447,7 @@ mod tests {
 
         #[test]
         fn parse_never_panics(raw in ".{0,40}", vr_idx in 0usize..34) {
-            let vr: Vr = ["AE","AS","AT","CS","DA","DS","DT","FD","FL","IS","LO","LT","OB","OD","OF","OL","OV","OW","PN","SH","SL","SQ","SS","ST","SV","TM","UC","UI","UL","UN","UR","US","UT","UV"][vr_idx].parse().unwrap();
+            let vr: VR = ["AE","AS","AT","CS","DA","DS","DT","FD","FL","IS","LO","LT","OB","OD","OF","OL","OV","OW","PN","SH","SL","SQ","SS","ST","SV","TM","UC","UI","UL","UN","UR","US","UT","UV"][vr_idx].parse().unwrap();
             let _ = Matcher::parse(vr, &raw, &MatchOptions::default());
         }
     }

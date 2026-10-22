@@ -17,6 +17,7 @@ mod extra;
 mod query;
 mod write;
 
+use medicus_core::TagExt as _;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
@@ -30,7 +31,7 @@ use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
 use medicus_core::{Error, Result};
-use medicus_core::{Tag, Vr};
+use medicus_core::{Tag, VR};
 
 pub use sql::{Backend, Cell, CellKind, Dialect, Stmt, Tx};
 
@@ -90,7 +91,7 @@ impl<B: Backend> SqlIndex<B> {
             .map(|r| {
                 let text = |i: usize| r.get(i).and_then(Cell::text).unwrap_or_default();
                 let tag: Tag = text(0).parse().map_err(|_| corrupt("extra tag"))?;
-                let vr: Vr = text(1).parse().map_err(|_| corrupt("extra tag VR"))?;
+                let vr: VR = text(1).parse().map_err(|_| corrupt("extra tag VR"))?;
                 let level =
                     extra::parse_level(text(2)).ok_or_else(|| corrupt("extra tag level"))?;
                 let state = if text(3) == "ready" {
@@ -275,8 +276,8 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
             let mut s = Stmt::new(d);
             s.push("INSERT INTO extra_tags (tag, vr, level, state) VALUES ")
                 .bind_list([
-                    Cell::from(String::from(t.tag)),
-                    Cell::from(t.vr.as_str()),
+                    Cell::from(t.tag.json_key()),
+                    Cell::from(t.vr.to_string()),
                     Cell::from(extra::level_name(t.level)),
                     Cell::from(extra::state_name(state)),
                 ])
@@ -290,7 +291,7 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         {
             let mut s = Stmt::new(d);
             s.push("DELETE FROM extra_tags WHERE tag = ")
-                .bind(String::from(e.tag.tag));
+                .bind(e.tag.tag.json_key());
             tx.execute(&s).await?;
         }
         tx.commit().await?;
@@ -313,7 +314,7 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         let mut tx = self.backend.begin_write().await?;
         let mut s = Stmt::new(self.backend.dialect());
         s.push("UPDATE extra_tags SET state = 'ready' WHERE tag = ")
-            .bind(String::from(tag));
+            .bind(tag.json_key());
         if tx.execute(&s).await? == 0 {
             return Err(Error::not_found(format!(
                 "{tag} is not a configured extra tag"

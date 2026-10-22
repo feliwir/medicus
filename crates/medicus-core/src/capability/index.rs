@@ -113,8 +113,10 @@ pub struct DeleteOutcome {
 /// An attribute indexed in addition to the standard ones (configured by the operator).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct ExtraTag {
+    #[serde(with = "crate::tag::serde_tag")]
     pub tag: crate::Tag,
-    pub vr: crate::Vr,
+    #[serde(with = "crate::tag::serde_vr")]
+    pub vr: crate::VR,
     pub level: crate::QueryLevel,
 }
 
@@ -144,7 +146,11 @@ pub struct QueryResult {
     /// Constrained keys the index could not evaluate (e.g. attributes it does not index, or
     /// sequence matching). The caller must post-filter on full metadata; paging is then
     /// approximate.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        with = "crate::tag::serde_tags"
+    )]
     pub unfiltered: Vec<crate::Tag>,
 }
 
@@ -251,6 +257,7 @@ pub enum IndexRequest {
         attributes: DicomJsonObject,
     },
     MarkExtraReady {
+        #[serde(with = "crate::tag::serde_tag")]
         tag: crate::Tag,
     },
 }

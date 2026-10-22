@@ -19,22 +19,22 @@ pub use matcher::Matcher;
 /// Value normalization shared by the in-memory matcher and index backends, so that SQL
 /// evaluation agrees with [`Query::matches`].
 pub mod values {
-    use crate::Vr;
+    use crate::VR;
 
     /// Removes insignificant padding (and trailing empty PN components), as the matcher does.
-    pub fn normalize(vr: Vr, raw: &str) -> String {
+    pub fn normalize(vr: VR, raw: &str) -> String {
         super::matcher::normalize(vr, raw)
     }
 
     /// Canonical, lexically sortable form of a DA or TM value (lower end of its interval), e.g.
     /// for an index column. `None` for other VRs or invalid values.
-    pub fn sortable_lower(vr: Vr, raw: &str) -> Option<String> {
+    pub fn sortable_lower(vr: VR, raw: &str) -> Option<String> {
         super::datetime::sortable(vr, raw, false)
     }
 
     /// Like [`sortable_lower`], for the upper end of the value's interval (the TM `"10"` covers
     /// up to 10:59:59.999999). Used for the end of a range.
-    pub fn sortable_upper(vr: Vr, raw: &str) -> Option<String> {
+    pub fn sortable_upper(vr: VR, raw: &str) -> Option<String> {
         super::datetime::sortable(vr, raw, true)
     }
 
@@ -44,12 +44,12 @@ pub mod values {
     }
 }
 
-use crate::{QueryLevel, Tag, Vr};
+use crate::{QueryLevel, Tag, VR};
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum QueryError {
     #[error("invalid key value {value:?} for VR {vr}")]
-    InvalidValue { vr: Vr, value: String },
+    InvalidValue { vr: VR, value: String },
     #[error("range {value:?} is empty (start is after end)")]
     EmptyRange { value: String },
     #[error("sequence keys must be built from items, not from a string value")]
@@ -81,14 +81,16 @@ impl Default for MatchOptions {
 /// One key attribute of a query: what to match and/or return.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Key {
+    #[serde(with = "crate::tag::serde_tag")]
     pub tag: Tag,
-    pub vr: Vr,
+    #[serde(with = "crate::tag::serde_vr")]
+    pub vr: VR,
     pub matcher: Matcher,
 }
 
 impl Key {
     /// Builds a key from its encoded value (see [`Matcher::parse`]).
-    pub fn parse(tag: Tag, vr: Vr, raw: &str, options: &MatchOptions) -> Result<Self, QueryError> {
+    pub fn parse(tag: Tag, vr: VR, raw: &str, options: &MatchOptions) -> Result<Self, QueryError> {
         Ok(Self {
             tag,
             vr,
@@ -97,7 +99,7 @@ impl Key {
     }
 
     /// A key that only requests the attribute to be returned.
-    pub fn universal(tag: Tag, vr: Vr) -> Self {
+    pub fn universal(tag: Tag, vr: VR) -> Self {
         Self {
             tag,
             vr,
@@ -115,7 +117,7 @@ impl Key {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum OrderKey {
-    Attribute(Tag),
+    Attribute(#[serde(with = "crate::tag::serde_tag")] Tag),
     ReceivedAt,
     LastAccessedAt,
     Size,
@@ -211,7 +213,7 @@ mod tests {
         })
     }
 
-    fn q(keys: &[(Tag, Vr, &str)]) -> Query {
+    fn q(keys: &[(Tag, VR, &str)]) -> Query {
         let o = MatchOptions::default();
         keys.iter()
             .fold(Query::new(QueryLevel::Study), |q, (t, vr, v)| {
@@ -226,32 +228,32 @@ mod tests {
 
     #[test]
     fn matches_against_dicom_json() {
-        assert!(check(&q(&[(tags::PATIENT_NAME, Vr::PN, "doe^john")])));
-        assert!(check(&q(&[(tags::PATIENT_NAME, Vr::PN, "DOE*")])));
-        assert!(!check(&q(&[(tags::PATIENT_NAME, Vr::PN, "Smith*")])));
-        assert!(check(&q(&[(tags::PATIENT_ID, Vr::LO, "PID-1")])));
-        assert!(!check(&q(&[(tags::PATIENT_ID, Vr::LO, "pid-1")])));
+        assert!(check(&q(&[(tags::PATIENT_NAME, VR::PN, "doe^john")])));
+        assert!(check(&q(&[(tags::PATIENT_NAME, VR::PN, "DOE*")])));
+        assert!(!check(&q(&[(tags::PATIENT_NAME, VR::PN, "Smith*")])));
+        assert!(check(&q(&[(tags::PATIENT_ID, VR::LO, "PID-1")])));
+        assert!(!check(&q(&[(tags::PATIENT_ID, VR::LO, "pid-1")])));
         assert!(check(&q(&[(
             tags::STUDY_DATE,
-            Vr::DA,
+            VR::DA,
             "20240301-20240331"
         )])));
-        assert!(check(&q(&[(tags::STUDY_DATE, Vr::DA, "-20240315")])));
-        assert!(!check(&q(&[(tags::STUDY_DATE, Vr::DA, "20240316-")])));
-        assert!(check(&q(&[(tags::STUDY_TIME, Vr::TM, "10-11")])));
-        assert!(check(&q(&[(tags::STUDY_TIME, Vr::TM, "1015")])));
-        assert!(check(&q(&[(tags::MODALITIES_IN_STUDY, Vr::CS, "SR")])));
-        assert!(check(&q(&[(tags::MODALITIES_IN_STUDY, Vr::CS, "MR\\CT")])));
+        assert!(check(&q(&[(tags::STUDY_DATE, VR::DA, "-20240315")])));
+        assert!(!check(&q(&[(tags::STUDY_DATE, VR::DA, "20240316-")])));
+        assert!(check(&q(&[(tags::STUDY_TIME, VR::TM, "10-11")])));
+        assert!(check(&q(&[(tags::STUDY_TIME, VR::TM, "1015")])));
+        assert!(check(&q(&[(tags::MODALITIES_IN_STUDY, VR::CS, "SR")])));
+        assert!(check(&q(&[(tags::MODALITIES_IN_STUDY, VR::CS, "MR\\CT")])));
         assert!(check(&q(&[(
             tags::NUMBER_OF_STUDY_RELATED_INSTANCES,
-            Vr::IS,
+            VR::IS,
             "+42"
         )])));
         // universal keys always match, also for absent attributes
-        assert!(check(&q(&[(tags::ACCESSION_NUMBER, Vr::SH, "")])));
+        assert!(check(&q(&[(tags::ACCESSION_NUMBER, VR::SH, "")])));
         // a constraint on an absent / empty attribute does not match
-        assert!(!check(&q(&[(tags::ACCESSION_NUMBER, Vr::SH, "A1")])));
-        assert!(!check(&q(&[(tags::STUDY_DESCRIPTION, Vr::LO, "x*")])));
+        assert!(!check(&q(&[(tags::ACCESSION_NUMBER, VR::SH, "A1")])));
+        assert!(!check(&q(&[(tags::STUDY_DESCRIPTION, VR::LO, "x*")])));
     }
 
     #[test]
@@ -264,10 +266,10 @@ mod tests {
         query.options = o.clone();
         query
             .keys
-            .push(Key::parse(tags::STUDY_DESCRIPTION, Vr::LO, "\"\"", &o).unwrap());
+            .push(Key::parse(tags::STUDY_DESCRIPTION, VR::LO, "\"\"", &o).unwrap());
         query
             .keys
-            .push(Key::parse(tags::ACCESSION_NUMBER, Vr::SH, "\"\"", &o).unwrap());
+            .push(Key::parse(tags::ACCESSION_NUMBER, VR::SH, "\"\"", &o).unwrap());
         assert!(check(&query));
     }
 
@@ -276,12 +278,12 @@ mod tests {
         let item = |code: &str, scheme: &str| {
             let o = MatchOptions::default();
             Query::new(QueryLevel::Study).with_key(Key {
-                tag: Tag::new(0x0008, 0x1032),
-                vr: Vr::SQ,
+                tag: Tag(0x0008, 0x1032),
+                vr: VR::SQ,
                 matcher: Matcher::Sequence {
                     keys: vec![
-                        Key::parse(Tag::new(0x0008, 0x0100), Vr::SH, code, &o).unwrap(),
-                        Key::parse(Tag::new(0x0008, 0x0102), Vr::SH, scheme, &o).unwrap(),
+                        Key::parse(Tag(0x0008, 0x0100), VR::SH, code, &o).unwrap(),
+                        Key::parse(Tag(0x0008, 0x0102), VR::SH, scheme, &o).unwrap(),
                     ],
                 },
             })
@@ -295,8 +297,8 @@ mod tests {
     #[test]
     fn serde_roundtrip() {
         let query = q(&[
-            (tags::PATIENT_NAME, Vr::PN, "Doe*"),
-            (tags::STUDY_DATE, Vr::DA, "20240101-"),
+            (tags::PATIENT_NAME, VR::PN, "Doe*"),
+            (tags::STUDY_DATE, VR::DA, "20240101-"),
         ]);
         let s = serde_json::to_string(&query).unwrap();
         assert!(s.contains("\"type\":\"wildcard\""));

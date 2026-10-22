@@ -11,6 +11,9 @@ publish = false
 medicus-core.workspace = true
 
 bytes.workspace = true
+dicom-core.workspace = true
+dicom-dictionary-std.workspace = true
+dicom-object.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 

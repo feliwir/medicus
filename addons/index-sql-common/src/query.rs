@@ -4,10 +4,11 @@
 //! normalization, same sortable date/time forms, same PN case folding), so an index answer equals
 //! what the in-memory matcher would return. The shared conformance suite checks this.
 
+use medicus_core::TagExt as _;
 use medicus_core::capability::index::{DicomJsonObject, ExtraTagState, ExtraTagStatus};
 use medicus_core::query::values::{fold, normalize, sortable_lower, sortable_upper};
 use medicus_core::query::{Key, MatchOptions, Matcher, OrderKey, Query};
-use medicus_core::{Error, QueryLevel, Result, Tag, Vr};
+use medicus_core::{Error, QueryLevel, Result, Tag, VR};
 use serde_json::{Value, json};
 
 use crate::extra;
@@ -175,8 +176,8 @@ fn stored_value(c: &Column, raw: &str, opts: &MatchOptions) -> Option<Cell> {
         } else {
             v
         })),
-        Storage::Date => sortable_lower(Vr::DA, &v).map(Cell::Text),
-        Storage::Time { .. } => sortable_lower(Vr::TM, &v).map(Cell::Text),
+        Storage::Date => sortable_lower(VR::DA, &v).map(Cell::Text),
+        Storage::Time { .. } => sortable_lower(VR::TM, &v).map(Cell::Text),
         Storage::Int | Storage::Count { .. } => v
             .trim()
             .trim_start_matches('+')
@@ -302,8 +303,8 @@ fn scalar_condition(stmt: &mut Stmt, c: &Column, expr: &str, m: &Matcher, opts: 
         },
         Matcher::Range { from, to } => {
             let vr = match c.storage {
-                Storage::Date => Vr::DA,
-                Storage::Time { .. } => Vr::TM,
+                Storage::Date => VR::DA,
+                Storage::Time { .. } => VR::TM,
                 _ => {
                     stmt.push("1=0");
                     return;
@@ -362,7 +363,7 @@ pub(crate) fn row_to_json(
         }
     }
     for (c, cell) in compiled.select.iter().zip(row) {
-        let vr = c.vr.as_str();
+        let vr = c.vr.to_string();
         // JSON cells are only ever bound, never fetched; treat them as text for completeness.
         let cell = match cell {
             Cell::Json(s) => Cell::Text(s),
@@ -390,7 +391,7 @@ pub(crate) fn row_to_json(
             Cell::Int(i) => json!({ "vr": vr, "Value": [i] }),
             Cell::Json(_) => unreachable!("converted above"),
         };
-        obj.insert(String::from(c.tag), element);
+        obj.insert(c.tag.json_key(), element);
     }
     obj
 }
@@ -400,17 +401,17 @@ mod tests {
     use super::*;
     use medicus_core::tags;
 
-    fn key(tag: Tag, vr: Vr, v: &str) -> Key {
+    fn key(tag: Tag, vr: VR, v: &str) -> Key {
         Key::parse(tag, vr, v, &MatchOptions::default()).unwrap()
     }
 
     #[test]
     fn compiles_typical_study_query() {
         let q = Query::new(QueryLevel::Study)
-            .with_key(key(tags::PATIENT_NAME, Vr::PN, "Doe*"))
-            .with_key(key(tags::STUDY_DATE, Vr::DA, "20240101-20240131"))
-            .with_key(key(tags::MODALITIES_IN_STUDY, Vr::CS, "CT\\MR"))
-            .with_key(key(tags::ACCESSION_NUMBER, Vr::SH, ""));
+            .with_key(key(tags::PATIENT_NAME, VR::PN, "Doe*"))
+            .with_key(key(tags::STUDY_DATE, VR::DA, "20240101-20240131"))
+            .with_key(key(tags::MODALITIES_IN_STUDY, VR::CS, "CT\\MR"))
+            .with_key(key(tags::ACCESSION_NUMBER, VR::SH, ""));
         let c = compile(Dialect::Postgres, &q, &[]).unwrap();
         let sql = &c.stmt.sql;
         assert!(
@@ -428,10 +429,10 @@ mod tests {
 
     #[test]
     fn lower_level_keys_are_rejected_and_unknown_keys_reported() {
-        let q = Query::new(QueryLevel::Study).with_key(key(tags::MODALITY, Vr::CS, "CT"));
+        let q = Query::new(QueryLevel::Study).with_key(key(tags::MODALITY, VR::CS, "CT"));
         assert!(compile(Dialect::Sqlite, &q, &[]).is_err());
-        let other = Tag::new(0x0018, 0x0050);
-        let q = Query::new(QueryLevel::Instance).with_key(key(other, Vr::DS, "1.5"));
+        let other = Tag(0x0018, 0x0050);
+        let q = Query::new(QueryLevel::Instance).with_key(key(other, VR::DS, "1.5"));
         assert_eq!(
             compile(Dialect::Sqlite, &q, &[]).unwrap().unfiltered,
             vec![other]
@@ -441,7 +442,7 @@ mod tests {
     #[test]
     fn glob_escaping() {
         let q =
-            Query::new(QueryLevel::Study).with_key(key(tags::STUDY_DESCRIPTION, Vr::LO, "[a]*"));
+            Query::new(QueryLevel::Study).with_key(key(tags::STUDY_DESCRIPTION, VR::LO, "[a]*"));
         let c = compile(Dialect::Sqlite, &q, &[]).unwrap();
         assert_eq!(c.stmt.args[0], Cell::from("[[]a]*"));
     }
