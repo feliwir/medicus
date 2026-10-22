@@ -7,7 +7,9 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::capability::ByteStream;
-use crate::capability::index::{Duplicate, InstanceLocation, QueryResult, ResourceUid};
+use crate::capability::index::{
+    DicomJsonObject, Duplicate, InstanceLocation, QueryResult, ResourceUid,
+};
 use crate::capability::job::{Job, JobKind, JobProgress};
 use crate::error::Result;
 use crate::query::Query;
@@ -72,6 +74,14 @@ pub trait HostServices: Send + Sync + 'static {
         context: &CallContext,
         resource: &ResourceUid,
     ) -> Result<Vec<InstanceLocation>>;
+
+    /// An instance's metadata (needs `retrieve`): DICOM JSON of every attribute before the
+    /// bulk pixel data, read from the stored header without touching the pixel data.
+    async fn metadata(
+        &self,
+        context: &CallContext,
+        instance: &SopInstanceUid,
+    ) -> Result<DicomJsonObject>;
 
     /// Opens a stored instance's Part 10 file (needs `retrieve`).
     async fn open_instance(

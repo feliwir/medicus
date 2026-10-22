@@ -1,0 +1,19 @@
+[package]
+name = "dicomweb-dylib"
+description = "The dicomweb addon as a dynamically loadable library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+name = "medicus_addon_dicomweb"
+crate-type = ["cdylib"]
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+dicomweb = { path = "../dicomweb" }
+
+[lints]
+workspace = true

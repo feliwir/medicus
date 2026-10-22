@@ -12,14 +12,16 @@ name = "medicus"
 path = "src/main.rs"
 
 [features]
-default = ["builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse"]
+default = ["builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse", "builtin-dicomweb"]
 builtin-storage-fs = ["dep:storage-fs"]
 builtin-index-sqlite = ["dep:index-sqlite"]
 builtin-dimse = ["dep:dimse"]
+builtin-dicomweb = ["dep:dicomweb"]
 
 [dependencies]
 medicus-core.workspace = true
 medicus-host.workspace = true
+dicomweb = { path = "../../addons/dicomweb", optional = true }
 dimse = { path = "../../addons/dimse", optional = true }
 index-sqlite = { path = "../../addons/index-sqlite", optional = true }
 storage-fs = { path = "../../addons/storage-fs", optional = true }
@@ -53,6 +55,9 @@ uuid.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"
+mime = "0.3"
+multer = "3"
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 tower = { version = "0.5", features = ["util"] }
 medicus-testkit.workspace = true
 figment = { workspace = true, features = ["test"] }

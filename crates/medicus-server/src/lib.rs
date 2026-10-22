@@ -9,6 +9,8 @@ mod capacity;
 mod config;
 #[cfg(test)]
 mod dcmtk_tests;
+#[cfg(test)]
+mod dicomweb_tests;
 mod events;
 mod import;
 mod ingest;

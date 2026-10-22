@@ -1,0 +1,30 @@
+[package]
+name = "dicomweb"
+description = "medicus DICOMweb addon: QIDO-RS, WADO-RS and STOW-RS per node."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+medicus-core.workspace = true
+
+async-stream = "0.3"
+axum = "0.8"
+bytes.workspace = true
+dicom-core.workspace = true
+dicom-dictionary-std.workspace = true
+dicom-object.workspace = true
+futures.workspace = true
+mime = "0.3"
+multer = "3"
+serde.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util = "0.7"
+tracing.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

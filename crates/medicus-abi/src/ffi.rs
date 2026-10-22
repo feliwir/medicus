@@ -157,7 +157,8 @@ pub struct MdHostApi {
     ),
     /// Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
     /// Data methods take `{"context": ..., <arguments>}` (ABI 0.6): `query` (`query` → one page
-    /// of results), `locate` (`resource` → stored instances), `copy_instance` (`instance`,
+    /// of results), `locate` (`resource` → stored instances), `metadata` (`instance` → DICOM JSON of
+    /// its header), `copy_instance` (`instance`,
     /// `destination` node → ingest outcome), `authorize` (`permission`), `permissions` (→ the
     /// caller's permissions on the node), `submit_job` (`kind` → the queued job). Others:
     /// `nodes` and `peers` (`null` → the configured nodes / peers), `job_progress` (`{"job",

@@ -22,6 +22,8 @@ fn builtin(name: &str) -> Option<&'static StaticAddon> {
         "index-sqlite" => Some(&index_sqlite::ADDON),
         #[cfg(feature = "builtin-dimse")]
         "dimse" => Some(&dimse::ADDON),
+        #[cfg(feature = "builtin-dicomweb")]
+        "dicomweb" => Some(&dicomweb::ADDON),
         _ => None,
     }
 }

@@ -162,6 +162,22 @@ impl Archive {
             .transpose()
     }
 
+    /// An instance's metadata as DICOM JSON: every data element of its stored header (all but
+    /// the bulk pixel data), read with one range request.
+    pub(crate) async fn metadata(
+        &self,
+        partition: &Partition,
+        instance: &SopInstanceUid,
+    ) -> Result<DicomJsonObject> {
+        let header = self.header(partition, instance).await?;
+        let dataset: &dicom_object::InMemDicomObject = &header;
+        match dicom_json::to_value(dataset) {
+            Ok(serde_json::Value::Object(map)) => Ok(map),
+            Ok(_) => Err(Error::internal("metadata is not a JSON object")),
+            Err(e) => Err(Error::internal(format!("cannot convert metadata: {e}"))),
+        }
+    }
+
     /// The parsed stored header of `instance`.
     async fn header(
         &self,

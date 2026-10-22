@@ -214,6 +214,7 @@ fn to_buffer<T: serde::Serialize>(value: &T) -> Result<MdBuffer, Error> {
 enum Call {
     Query(WithContext<QueryArgs>),
     Locate(WithContext<LocateArgs>),
+    Metadata(WithContext<MetadataArgs>),
     CopyInstance(WithContext<CopyArgs>),
     Authorize(WithContext<AuthorizeArgs>),
     Permissions(WithContext<NoArgs>),
@@ -244,6 +245,11 @@ struct LocateArgs {
 }
 
 #[derive(serde::Deserialize)]
+struct MetadataArgs {
+    instance: SopInstanceUid,
+}
+
+#[derive(serde::Deserialize)]
 struct CopyArgs {
     instance: SopInstanceUid,
     destination: String,
@@ -270,6 +276,7 @@ impl Call {
         match method {
             b"query" => parse("query request", request).map(Self::Query),
             b"locate" => parse("locate request", request).map(Self::Locate),
+            b"metadata" => parse("metadata request", request).map(Self::Metadata),
             b"copy_instance" => parse("copy request", request).map(Self::CopyInstance),
             b"authorize" => parse("authorize request", request).map(Self::Authorize),
             b"permissions" => parse("permissions request", request).map(Self::Permissions),
@@ -288,6 +295,7 @@ impl Call {
         match self {
             Self::Query(r) => to_buffer(&services.query(&r.context, &r.args.query).await?),
             Self::Locate(r) => to_buffer(&services.locate(&r.context, &r.args.resource).await?),
+            Self::Metadata(r) => to_buffer(&services.metadata(&r.context, &r.args.instance).await?),
             Self::CopyInstance(r) => to_buffer(
                 &services
                     .copy_instance(&r.context, &r.args.instance, &r.args.destination)

@@ -2,7 +2,9 @@
 
 use medicus_abi::bridge::{completion, export_stream, stream_completion};
 use medicus_abi::ffi::{MdCancel, MdStr};
-use medicus_core::capability::index::{InstanceLocation, QueryResult, ResourceUid};
+use medicus_core::capability::index::{
+    DicomJsonObject, InstanceLocation, QueryResult, ResourceUid,
+};
 use medicus_core::capability::{
     ByteStream, HostServices, Ingested, Job, JobKind, JobProgress, Peer,
 };
@@ -89,6 +91,18 @@ impl HostServices for Host {
         self.call(
             "locate",
             &json!({ "context": context, "resource": resource }),
+        )
+        .await
+    }
+
+    async fn metadata(
+        &self,
+        context: &CallContext,
+        instance: &SopInstanceUid,
+    ) -> Result<DicomJsonObject> {
+        self.call(
+            "metadata",
+            &json!({ "context": context, "instance": instance }),
         )
         .await
     }

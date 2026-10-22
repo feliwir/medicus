@@ -12,7 +12,7 @@ is a breaking change.
   the origin; `open_instance` takes `{"context", "instance"}`; the data methods of `call`
   (`query`, `locate`, `submit_job`) take `{"context", ...}`. The core checks the caller's
   permission on the node and fails with the new status `MD_PERMISSION_DENIED` (11).
-- New host methods: `copy_instance`, `authorize`, `permissions`, `nodes`.
+- New host methods: `metadata`, `copy_instance`, `authorize`, `permissions`, `nodes`.
 - `RemoteNode` `send` requests carry the `node` (`NodeInfo`) the job was submitted through.
 
 ## 0.5

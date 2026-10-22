@@ -4,7 +4,9 @@
 
 use std::sync::Arc;
 
-use medicus_core::capability::index::{InstanceLocation, QueryResult, ResourceUid};
+use medicus_core::capability::index::{
+    DicomJsonObject, InstanceLocation, QueryResult, ResourceUid,
+};
 use medicus_core::capability::{
     ByteStream, HostServices, Ingested, Job, JobKind, JobProgress, JobState, Peer,
 };
@@ -105,6 +107,15 @@ impl HostServices for NodeServices {
     ) -> Result<Vec<InstanceLocation>> {
         let node = self.require(context, Permission::Retrieve).await?;
         self.archive.index.locate(node.partition()?, resource).await
+    }
+
+    async fn metadata(
+        &self,
+        context: &CallContext,
+        instance: &SopInstanceUid,
+    ) -> Result<DicomJsonObject> {
+        let node = self.require(context, Permission::Retrieve).await?;
+        self.archive.metadata(node.partition()?, instance).await
     }
 
     async fn open_instance(
