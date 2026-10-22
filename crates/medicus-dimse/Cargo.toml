@@ -1,0 +1,35 @@
+[package]
+name = "medicus-dimse"
+description = "DICOM upper layer and DIMSE services for medicus, built on dicom-rs."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+medicus-core.workspace = true
+
+async-trait.workspace = true
+bytes.workspace = true
+dicom-core.workspace = true
+dicom-dictionary-std = { workspace = true, features = ["sop-class"] }
+dicom-encoding.workspace = true
+dicom-object.workspace = true
+dicom-transfer-syntax-registry.workspace = true
+dicom-ul = { workspace = true, features = ["async"] }
+futures.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-stream = "0.1"
+tokio-util = "0.7"
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros"] }
+medicus-testkit.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

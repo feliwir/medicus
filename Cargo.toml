@@ -14,13 +14,17 @@ medicus-core = { path = "crates/medicus-core" }
 medicus-abi = { path = "crates/medicus-abi" }
 medicus-addon-sdk = { path = "crates/medicus-addon-sdk" }
 medicus-host = { path = "crates/medicus-host" }
+medicus-dimse = { path = "crates/medicus-dimse" }
 medicus-testkit = { path = "crates/medicus-testkit" }
 
 anyhow = "1"
 dicom-core = "0.10"
 dicom-dictionary-std = "0.10"
+dicom-encoding = "0.10"
 dicom-json = "0.10"
 dicom-object = "0.10"
+dicom-transfer-syntax-registry = { version = "0.10", features = ["deflate"] }
+dicom-ul = "0.10"
 async-trait = "0.1"
 bytes = "1.10"
 futures = "0.3"

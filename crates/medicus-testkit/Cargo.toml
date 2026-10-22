@@ -13,7 +13,9 @@ medicus-core.workspace = true
 bytes.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
+dicom-encoding.workspace = true
 dicom-object.workspace = true
+dicom-transfer-syntax-registry.workspace = true
 futures.workspace = true
 serde_json.workspace = true
 

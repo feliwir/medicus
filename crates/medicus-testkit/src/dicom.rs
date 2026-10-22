@@ -4,8 +4,10 @@ use dicom_core::header::Header as _;
 use dicom_core::value::DataSetSequence;
 use dicom_core::{DataElement, PrimitiveValue, Tag, VR};
 use dicom_dictionary_std::{tags, uids};
+use dicom_encoding::TransferSyntaxIndex as _;
 use dicom_object::InMemDicomObject;
 use dicom_object::meta::FileMetaTableBuilder;
+use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 
 /// Builds a CT image instance with configurable attributes and pixel data.
 #[derive(Debug, Clone)]
@@ -70,7 +72,40 @@ impl InstanceBuilder {
         self
     }
 
+    /// The complete Part 10 file.
     pub fn build(&self) -> Vec<u8> {
+        let file = self
+            .object()
+            .with_meta(FileMetaTableBuilder::new().transfer_syntax(self.transfer_syntax.as_str()))
+            .expect("valid meta");
+        let mut out = Vec::new();
+        file.write_all(&mut out).expect("in-memory write");
+        out
+    }
+
+    /// Only the data set, encoded in the transfer syntax (as a C-STORE carries it).
+    pub fn build_data_set(&self) -> Vec<u8> {
+        let ts = TransferSyntaxRegistry
+            .get(&self.transfer_syntax)
+            .expect("known transfer syntax");
+        let mut out = Vec::new();
+        self.object()
+            .write_dataset_with_ts(&mut out, ts)
+            .expect("in-memory write");
+        out
+    }
+
+    /// The configured SOP Instance UID.
+    pub fn sop_instance(&self) -> String {
+        self.elements
+            .iter()
+            .find(|e| e.tag() == tags::SOP_INSTANCE_UID)
+            .and_then(|e| e.to_str().ok())
+            .map(std::borrow::Cow::into_owned)
+            .unwrap_or_default()
+    }
+
+    fn object(&self) -> InMemDicomObject {
         let mut obj = InMemDicomObject::from_element_iter(self.elements.clone());
         if self.sequence {
             let item = |code: &str| {
@@ -99,11 +134,6 @@ impl InstanceBuilder {
                 PrimitiveValue::from(bytes),
             ));
         }
-        let file = obj
-            .with_meta(FileMetaTableBuilder::new().transfer_syntax(self.transfer_syntax.as_str()))
-            .expect("valid meta");
-        let mut out = Vec::new();
-        file.write_all(&mut out).expect("in-memory write");
-        out
+        obj
     }
 }
