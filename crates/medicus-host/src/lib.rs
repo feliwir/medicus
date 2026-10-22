@@ -14,3 +14,8 @@ mod loader;
 
 pub use loader::{AddonInfo, AddonLoader, LoadError, LoadedAddon, Named};
 pub use medicus_abi::StaticAddon;
+
+/// The addon ABI version this host implements, `(major << 16) | minor`.
+pub fn abi_version() -> u32 {
+    medicus_abi::ffi::MD_ABI_VERSION
+}

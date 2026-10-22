@@ -41,7 +41,7 @@ pub enum LoadError {
     InvalidInfo { addon: String, reason: String },
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 pub struct AddonInfo {
     pub name: String,
     pub version: String,
