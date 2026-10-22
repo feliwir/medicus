@@ -13,6 +13,7 @@ use medicus_core::{Error, Result};
 use serde::Serialize;
 
 use crate::archive::Archive;
+use dicom_dictionary_std::uids;
 
 const READ_CHUNK: usize = 256 * 1024;
 
@@ -22,8 +23,8 @@ pub(crate) struct ImportReport {
     pub(crate) stored: u64,
     pub(crate) replaced: u64,
     pub(crate) kept_existing: u64,
-    /// Files without the `DICM` prefix of a Part 10 file.
-    pub(crate) skipped: u64,
+    /// Files not imported, by reason (not Part 10, DICOMDIR, ...).
+    pub(crate) skipped: BTreeMap<String, u64>,
     /// Failures by error kind.
     pub(crate) failed: BTreeMap<String, u64>,
     pub(crate) bytes: u64,
@@ -50,12 +51,28 @@ fn files_below(root: &Path) -> std::io::Result<Vec<PathBuf>> {
     Ok(out)
 }
 
-fn is_part10(path: &Path) -> bool {
-    let mut head = [0u8; 132];
-    std::fs::File::open(path)
-        .and_then(|mut f| f.read_exact(&mut head))
-        .is_ok()
-        && &head[128..] == b"DICM"
+/// Why a file is not imported, if it is not.
+fn skip_reason(path: &Path) -> Option<&'static str> {
+    let Ok(mut file) = std::fs::File::open(path) else {
+        return Some("unreadable");
+    };
+    let mut preamble = [0u8; 128];
+    if file.read_exact(&mut preamble).is_err() {
+        return Some("not a DICOM Part 10 file");
+    }
+    // The meta group (including the DICM prefix) is read by dicom-rs.
+    // A missing DICM prefix means "not DICOM"; a broken meta group after it is a corrupt file,
+    // which the ingest pipeline reports as a failure.
+    match dicom_object::meta::FileMetaTable::from_reader(std::io::BufReader::new(file)) {
+        Err(
+            dicom_object::meta::Error::NotDicom { .. }
+            | dicom_object::meta::Error::ReadMagicCode { .. },
+        ) => Some("not a DICOM Part 10 file"),
+        Ok(meta) if meta.media_storage_sop_class_uid() == uids::MEDIA_STORAGE_DIRECTORY_STORAGE => {
+            Some("DICOMDIR")
+        }
+        Err(_) | Ok(_) => None,
+    }
 }
 
 async fn open(path: &Path) -> Result<ByteStream> {
@@ -69,17 +86,17 @@ async fn open(path: &Path) -> Result<ByteStream> {
 
 enum Outcome {
     Stored(u64, Duplicate),
-    Skipped,
+    Skipped(&'static str),
     Failed(Error),
 }
 
 async fn import_one(archive: &Archive, path: PathBuf) -> Outcome {
     let p = path.clone();
-    if !tokio::task::spawn_blocking(move || is_part10(&p))
+    let skip = tokio::task::spawn_blocking(move || skip_reason(&p))
         .await
-        .unwrap_or(false)
-    {
-        return Outcome::Skipped;
+        .unwrap_or(Some("unreadable"));
+    if let Some(reason) = skip {
+        return Outcome::Skipped(reason);
     }
     let origin = Origin::Import {
         path: path.display().to_string(),
@@ -122,7 +139,7 @@ pub(crate) async fn import(
                     Duplicate::KeptExisting => report.kept_existing += 1,
                 }
             }
-            Outcome::Skipped => report.skipped += 1,
+            Outcome::Skipped(reason) => *report.skipped.entry(reason.to_owned()).or_default() += 1,
             Outcome::Failed(e) => *report.failed.entry(e.kind.to_string()).or_default() += 1,
         }
     }
