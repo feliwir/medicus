@@ -23,6 +23,8 @@ index-sqlite = { path = "../../addons/index-sqlite", optional = true }
 storage-fs = { path = "../../addons/storage-fs", optional = true }
 
 anyhow.workspace = true
+async-stream = "0.3"
+axum = "0.8"
 bytes.workspace = true
 futures.workspace = true
 hex = "0.4"
@@ -36,12 +38,15 @@ figment.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio = { workspace = true, features = ["fs"] }
-tokio-util = { version = "0.7", features = ["io"] }
+tokio = { workspace = true, features = ["fs", "net"] }
+tokio-util = { version = "0.7", features = ["io", "rt"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
 [dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", features = ["util"] }
+async-trait.workspace = true
 medicus-testkit.workspace = true
 figment = { workspace = true, features = ["test"] }
 tempfile.workspace = true

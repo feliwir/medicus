@@ -95,7 +95,6 @@ impl Archive {
     }
 
     /// Receives the highest committed event sequence number whenever it changes.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by the event dispatcher (next step)"))]
     pub(crate) fn watch_events(&self) -> watch::Receiver<u64> {
         self.last_seq.subscribe()
     }
@@ -109,7 +108,6 @@ impl Archive {
     }
 
     /// Opens an instance's Part 10 file.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by the admin API (next step)"))]
     pub(crate) async fn retrieve(
         &self,
         instance: &SopInstanceUid,
@@ -129,7 +127,6 @@ impl Archive {
     }
 
     /// Deletes a resource from the index (with its event) and then its blobs.
-    #[cfg_attr(not(test), expect(dead_code, reason = "used by the admin API (next step)"))]
     pub(crate) async fn delete(
         &self,
         resource: &ResourceUid,
