@@ -21,7 +21,7 @@ use medicus_core::blob::BlobKind;
 use medicus_core::capability::index::{BlobRef, Duplicate, InstanceRecord};
 use medicus_core::capability::{ByteStream, Ingested};
 use medicus_core::event::{Event, EventKind, Origin, ResourceRef};
-use medicus_core::{BlobKey, Error, ErrorKind, Result};
+use medicus_core::{BlobKey, Error, ErrorKind, Partition, Result};
 
 use crate::archive::Archive;
 use parse::ParsedHeader;
@@ -70,7 +70,12 @@ impl Archive {
     }
 
     /// Ingests one DICOM Part 10 file.
-    pub async fn ingest(&self, mut data: ByteStream, origin: Origin) -> Result<Ingested> {
+    pub async fn ingest(
+        &self,
+        partition: &Partition,
+        mut data: ByteStream,
+        origin: Origin,
+    ) -> Result<Ingested> {
         self.ensure_capacity()?;
         let (prefix, parsed, complete) = self.read_header(&mut data).await?;
         let rest: ByteStream = if complete {
@@ -81,7 +86,7 @@ impl Archive {
 
         // Stream the complete file: the buffered prefix, then the rest as it arrives.
         let store = self.store(&self.default_store)?;
-        let key = BlobKey::generate(BlobKind::Instance);
+        let key = BlobKey::generate(partition, BlobKind::Instance);
         let written = Arc::new(AtomicU64::new(0));
         let counter = written.clone();
         let file: ByteStream = Box::pin(
@@ -97,6 +102,7 @@ impl Archive {
         debug_assert_eq!(meta.size, written.load(Ordering::Relaxed));
 
         let record = InstanceRecord {
+            partition: partition.clone(),
             study: parsed.study.clone(),
             series: parsed.series.clone(),
             instance: parsed.instance.clone(),
@@ -110,16 +116,18 @@ impl Archive {
             },
             header_length: parsed.header_length,
         };
-        let event = Event::new(EventKind::InstanceStored, origin).with_resource(ResourceRef {
-            patient_id: parsed.patient_id,
-            study: Some(record.study.clone()),
-            series: Some(record.series.clone()),
-            instance: Some(record.instance.clone()),
-            sop_class: Some(record.sop_class.clone()),
-            transfer_syntax: Some(record.transfer_syntax.clone()),
-            size: Some(record.size),
-            blob_store: Some(self.default_store.clone()),
-        });
+        let event = Event::new(EventKind::InstanceStored, origin)
+            .with_partition(partition.clone())
+            .with_resource(ResourceRef {
+                patient_id: parsed.patient_id,
+                study: Some(record.study.clone()),
+                series: Some(record.series.clone()),
+                instance: Some(record.instance.clone()),
+                sop_class: Some(record.sop_class.clone()),
+                transfer_syntax: Some(record.transfer_syntax.clone()),
+                size: Some(record.size),
+                blob_store: Some(self.default_store.clone()),
+            });
         let outcome = match self
             .index
             .store_instance(&record, self.policy, &event)
@@ -226,11 +234,22 @@ mod tests {
         );
         let stored = f
             .archive
-            .ingest(stream(&file, 997), origin())
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&file, 997),
+                origin(),
+            )
             .await
             .unwrap();
         assert_eq!(stored.instance.as_str(), "1.2.3.1.9");
-        let (_, data) = f.archive.retrieve(&stored.instance).await.unwrap();
+        let (_, data) = f
+            .archive
+            .retrieve(
+                &medicus_core::Partition::default_partition(),
+                &stored.instance,
+            )
+            .await
+            .unwrap();
         assert_eq!(read_all(data).await, file, "stored byte-identically");
     }
 
@@ -244,14 +263,25 @@ mod tests {
         // Small chunks: the header is assembled across many of them.
         let stored = f
             .archive
-            .ingest(stream(&file, 997), origin())
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&file, 997),
+                origin(),
+            )
             .await
             .unwrap();
         assert_eq!(stored.instance.as_str(), "1.2.3.1.1");
         assert_eq!(stored.size, file.len() as u64);
         assert_eq!(stored.duplicate, Duplicate::None);
 
-        let (loc, data) = f.archive.retrieve(&stored.instance).await.unwrap();
+        let (loc, data) = f
+            .archive
+            .retrieve(
+                &medicus_core::Partition::default_partition(),
+                &stored.instance,
+            )
+            .await
+            .unwrap();
         assert_eq!(read_all(data).await, file, "stored byte-identically");
         // The recorded header prefix (a range read, not the whole 3 MiB file) yields the header.
         assert!(
@@ -278,7 +308,13 @@ mod tests {
         let q = Query::new(QueryLevel::Study).with_key(
             Key::parse(tags::PATIENT_NAME, VR::PN, "doe*", &MatchOptions::default()).unwrap(),
         );
-        let rows = f.archive.index.query(&q).await.unwrap().rows;
+        let rows = f
+            .archive
+            .index
+            .query(&medicus_core::Partition::default_partition(), &q)
+            .await
+            .unwrap()
+            .rows;
         assert_eq!(rows.len(), 1);
 
         let events = f.archive.index.events_after(0, 10).await.unwrap();
@@ -305,22 +341,56 @@ mod tests {
         let b = InstanceBuilder::new("1.2.3", "1.2.3.1", "1.2.3.1.1")
             .attr(tags::PATIENT_NAME, VR::PN, "Doe^Jane")
             .build();
-        f.archive.ingest(stream(&a, 4096), origin()).await.unwrap();
-        let second = f.archive.ingest(stream(&b, 4096), origin()).await.unwrap();
+        f.archive
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&a, 4096),
+                origin(),
+            )
+            .await
+            .unwrap();
+        let second = f
+            .archive
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&b, 4096),
+                origin(),
+            )
+            .await
+            .unwrap();
         assert!(matches!(second.duplicate, Duplicate::Replaced { .. }));
         assert_eq!(blob_files(f.dir.path()).len(), 1, "replaced blob deleted");
-        let (_, data) = f.archive.retrieve(&second.instance).await.unwrap();
+        let (_, data) = f
+            .archive
+            .retrieve(
+                &medicus_core::Partition::default_partition(),
+                &second.instance,
+            )
+            .await
+            .unwrap();
         assert_eq!(read_all(data).await, b);
 
         let other = InstanceBuilder::new("1.2.3", "1.2.3.2", "1.2.3.2.1").build();
         f.archive
-            .ingest(stream(&other, 4096), origin())
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&other, 4096),
+                origin(),
+            )
             .await
             .unwrap();
         assert_eq!(blob_files(f.dir.path()).len(), 2);
 
         let study = ResourceUid::Study(StudyInstanceUid::parse("1.2.3").unwrap());
-        let out = f.archive.delete(&study, origin()).await.unwrap();
+        let out = f
+            .archive
+            .delete(
+                &medicus_core::Partition::default_partition(),
+                &study,
+                origin(),
+            )
+            .await
+            .unwrap();
         assert_eq!(out.removed.len(), 2);
         assert!(
             blob_files(f.dir.path()).is_empty(),
@@ -351,7 +421,11 @@ mod tests {
         let f = fixture().await;
         let err = f
             .archive
-            .ingest(stream(b"definitely not DICOM", 5), origin())
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(b"definitely not DICOM", 5),
+                origin(),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::InvalidArgument);
@@ -359,7 +433,11 @@ mod tests {
         let truncated = &file[..file.len() / 3];
         assert_eq!(
             f.archive
-                .ingest(stream(truncated, 64), origin())
+                .ingest(
+                    &medicus_core::Partition::default_partition(),
+                    stream(truncated, 64),
+                    origin()
+                )
                 .await
                 .unwrap_err()
                 .kind,
@@ -370,7 +448,11 @@ mod tests {
             .build();
         assert_eq!(
             f.archive
-                .ingest(stream(&no_series, 64), origin())
+                .ingest(
+                    &medicus_core::Partition::default_partition(),
+                    stream(&no_series, 64),
+                    origin()
+                )
                 .await
                 .unwrap_err()
                 .kind,
@@ -390,7 +472,11 @@ mod tests {
             .build();
         let err = f
             .archive
-            .ingest(stream(&big, 512), origin())
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&big, 512),
+                origin(),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::ResourceExhausted);

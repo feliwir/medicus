@@ -59,9 +59,10 @@ impl Archive {
                 .index
                 .stored_bytes()
                 .await?
-                .get(&self.default_store)
-                .copied()
-                .unwrap_or(0);
+                .iter()
+                .filter(|s| s.store == self.default_store)
+                .map(|s| s.bytes)
+                .sum();
             fills.push(Fill { used, limit: quota });
         }
         Ok(fills
@@ -162,27 +163,49 @@ mod tests {
             ("1.2.3.2", "1.2.3.2.1"),
         ] {
             archive
-                .ingest(stream(&file(series, sop), 4096), origin())
+                .ingest(
+                    &medicus_core::Partition::default_partition(),
+                    stream(&file(series, sop), 4096),
+                    origin(),
+                )
                 .await
                 .unwrap();
             archive.check_capacity().await.unwrap();
         }
         assert!(archive.check_capacity().await.unwrap().unwrap().percent() >= 90.0);
         let err = archive
-            .ingest(stream(&file("1.2.3.3", "1.2.3.3.1"), 4096), origin())
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&file("1.2.3.3", "1.2.3.3.1"), 4096),
+                origin(),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.kind, ErrorKind::ResourceExhausted);
 
         // Hysteresis: dropping below the critical level is not enough...
         let second_series = ResourceUid::Series("1.2.3.2".parse().unwrap());
-        archive.delete(&second_series, origin()).await.unwrap();
+        archive
+            .delete(
+                &medicus_core::Partition::default_partition(),
+                &second_series,
+                origin(),
+            )
+            .await
+            .unwrap();
         let level = archive.check_capacity().await.unwrap().unwrap();
         assert!((50.0..90.0).contains(&level.percent()), "{level:?}");
         assert!(archive.ensure_capacity().is_err());
         // ...only below the resume level.
         let study = ResourceUid::Study(StudyInstanceUid::parse("1.2.3").unwrap());
-        archive.delete(&study, origin()).await.unwrap();
+        archive
+            .delete(
+                &medicus_core::Partition::default_partition(),
+                &study,
+                origin(),
+            )
+            .await
+            .unwrap();
         archive.check_capacity().await.unwrap();
         archive.ensure_capacity().unwrap();
 

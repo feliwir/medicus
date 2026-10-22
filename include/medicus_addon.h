@@ -19,7 +19,7 @@
 /**
  * Minor ABI version.
  */
-#define MD_ABI_MINOR 5
+#define MD_ABI_MINOR 6
 
 /**
  * `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.

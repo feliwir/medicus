@@ -10,7 +10,7 @@ use medicus_core::capability::index::{DicomJsonObject, QueryResult, ResourceUid}
 use medicus_core::query::DicomJson;
 use medicus_core::query::{Attributes, Key, Matcher, Query};
 use medicus_core::uid::SopInstanceUid;
-use medicus_core::{Error, QueryLevel, Result, Tag, TagExt as _, tags};
+use medicus_core::{Error, Partition, QueryLevel, Result, Tag, TagExt as _, tags};
 
 use crate::archive::Archive;
 use crate::ingest::parse;
@@ -20,12 +20,12 @@ const PAGE: u32 = 500;
 
 impl Archive {
     /// Runs `query` to a complete answer (see the module documentation).
-    pub(crate) async fn query(&self, query: &Query) -> Result<QueryResult> {
+    pub(crate) async fn query(&self, partition: &Partition, query: &Query) -> Result<QueryResult> {
         let fill: Vec<Tag> = query
             .return_tags()
             .filter(|t| !self.index_provides(*t, query.level))
             .collect();
-        let first = self.index.query(query).await?;
+        let first = self.index.query(partition, query).await?;
         if first.unfiltered.is_empty() && fill.is_empty() {
             return Ok(first);
         }
@@ -38,7 +38,7 @@ impl Archive {
             // Only attributes to add: the index's paging is exact.
             let mut result = first;
             for row in &mut result.rows {
-                self.complete(query, row, &post, &fill).await?;
+                self.complete(partition, query, row, &post, &fill).await?;
             }
             return Ok(result);
         }
@@ -51,11 +51,14 @@ impl Archive {
         let mut matches = Vec::new();
         let mut more = true;
         while more && wanted.is_none_or(|w| (matches.len() as u64) <= w) {
-            let page = self.index.query(&candidates).await?;
+            let page = self.index.query(partition, &candidates).await?;
             more = page.has_more;
             candidates.offset += u64::from(PAGE);
             for mut row in page.rows {
-                if self.complete(query, &mut row, &post, &fill).await? {
+                if self
+                    .complete(partition, query, &mut row, &post, &fill)
+                    .await?
+                {
                     matches.push(row);
                 }
             }
@@ -91,16 +94,17 @@ impl Archive {
     /// of one of its instances. Returns whether the row matches.
     async fn complete(
         &self,
+        partition: &Partition,
         query: &Query,
         row: &mut DicomJsonObject,
         post: &[&Key],
         fill: &[Tag],
     ) -> Result<bool> {
-        let Some(instance) = self.representative(query.level, row).await? else {
+        let Some(instance) = self.representative(partition, query.level, row).await? else {
             // No stored instance (e.g. deleted meanwhile): only universal keys can match.
             return Ok(post.iter().all(|k| matches!(k.matcher, Matcher::Universal)));
         };
-        let header = self.header(&instance).await?;
+        let header = self.header(partition, &instance).await?;
         let wanted = post.iter().map(|k| k.tag).chain(fill.iter().copied());
         let attributes = parse::to_json(&header, wanted)?;
         let entity = DicomJson::new(&attributes);
@@ -121,6 +125,7 @@ impl Archive {
     /// One stored instance of the entity a result row describes.
     async fn representative(
         &self,
+        partition: &Partition,
         level: QueryLevel,
         row: &DicomJsonObject,
     ) -> Result<Option<SopInstanceUid>> {
@@ -150,7 +155,7 @@ impl Archive {
             })
             .with_key(Key::universal(tags::SOP_INSTANCE_UID, medicus_core::VR::UI));
         one.limit = Some(1);
-        let rows = self.index.query(&one).await?.rows;
+        let rows = self.index.query(partition, &one).await?.rows;
         rows.first()
             .and_then(|r| first(r, tags::SOP_INSTANCE_UID))
             .map(|uid| SopInstanceUid::parse(&uid).map_err(|e| Error::internal(e.to_string())))
@@ -158,10 +163,14 @@ impl Archive {
     }
 
     /// The parsed stored header of `instance`.
-    async fn header(&self, instance: &SopInstanceUid) -> Result<dicom_object::DefaultDicomObject> {
+    async fn header(
+        &self,
+        partition: &Partition,
+        instance: &SopInstanceUid,
+    ) -> Result<dicom_object::DefaultDicomObject> {
         let location = self
             .index
-            .locate(&ResourceUid::Instance(instance.clone()))
+            .locate(partition, &ResourceUid::Instance(instance.clone()))
             .await?
             .into_iter()
             .next()
@@ -227,7 +236,14 @@ mod tests {
             let origin = Origin::Internal {
                 component: "test".into(),
             };
-            archive.ingest(stream(&file, 4096), origin).await.unwrap();
+            archive
+                .ingest(
+                    &medicus_core::Partition::default_partition(),
+                    stream(&file, 4096),
+                    origin,
+                )
+                .await
+                .unwrap();
         }
         archive
     }
@@ -255,7 +271,13 @@ mod tests {
     async fn filters_on_attributes_the_index_does_not_store() {
         let dir = tempfile::tempdir().unwrap();
         let archive = populated(dir.path()).await;
-        let result = archive.query(&study_query()).await.unwrap();
+        let result = archive
+            .query(
+                &medicus_core::Partition::default_partition(),
+                &study_query(),
+            )
+            .await
+            .unwrap();
         assert!(result.unfiltered.is_empty());
         assert!(!result.has_more);
         assert_eq!(
@@ -276,11 +298,17 @@ mod tests {
         let mut q = study_query();
         q.limit = Some(1);
         q.offset = 1;
-        let result = archive.query(&q).await.unwrap();
+        let result = archive
+            .query(&medicus_core::Partition::default_partition(), &q)
+            .await
+            .unwrap();
         assert_eq!(uids(&result, tags::STUDY_INSTANCE_UID), ["1.2.2"]);
         assert!(result.has_more);
         q.offset = 2;
-        let result = archive.query(&q).await.unwrap();
+        let result = archive
+            .query(&medicus_core::Partition::default_partition(), &q)
+            .await
+            .unwrap();
         assert_eq!(uids(&result, tags::STUDY_INSTANCE_UID), ["1.2.4"]);
         assert!(!result.has_more);
     }
@@ -301,7 +329,10 @@ mod tests {
             )
             .with_key(Key::universal(tags::MANUFACTURER_MODEL_NAME, VR::LO));
         q.limit = Some(10);
-        let result = archive.query(&q).await.unwrap();
+        let result = archive
+            .query(&medicus_core::Partition::default_partition(), &q)
+            .await
+            .unwrap();
         assert_eq!(uids(&result, tags::SERIES_INSTANCE_UID), ["1.2.1.1"]);
         assert_eq!(uids(&result, tags::MANUFACTURER_MODEL_NAME), ["B"]);
     }

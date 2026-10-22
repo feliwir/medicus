@@ -1,6 +1,5 @@
 //! C vtables → core capability traits.
 
-use std::collections::BTreeMap;
 use std::ffi::c_void;
 use std::ops::Range;
 
@@ -12,11 +11,9 @@ use medicus_abi::ffi::{
     MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange,
     MdRemoteNodeVtable, MdServiceVtable, MdStr,
 };
-use medicus_core::BlobKey;
-use medicus_core::Tag;
 use medicus_core::capability::index::{
     DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagStatus, IndexRequest,
-    InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome,
+    InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome, StoredBytes,
 };
 use medicus_core::capability::{
     BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, StorageUsage,
@@ -27,6 +24,7 @@ use medicus_core::capability::{
 use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
+use medicus_core::{BlobKey, Partition, Tag};
 use medicus_core::{Error, Result};
 use serde::de::DeserializeOwned;
 use tokio::runtime::Handle;
@@ -263,22 +261,34 @@ impl IndexStore for FfiIndexStore {
         .await
     }
 
-    async fn query(&self, query: &Query) -> Result<QueryResult> {
+    async fn query(&self, partition: &Partition, query: &Query) -> Result<QueryResult> {
         self.call(IndexRequest::Query {
+            partition: partition.clone(),
             query: query.clone(),
         })
         .await
     }
 
-    async fn locate(&self, resource: &ResourceUid) -> Result<Vec<InstanceLocation>> {
+    async fn locate(
+        &self,
+        partition: &Partition,
+        resource: &ResourceUid,
+    ) -> Result<Vec<InstanceLocation>> {
         self.call(IndexRequest::Locate {
+            partition: partition.clone(),
             resource: resource.clone(),
         })
         .await
     }
 
-    async fn delete(&self, resource: &ResourceUid, event: &Event) -> Result<DeleteOutcome> {
+    async fn delete(
+        &self,
+        partition: &Partition,
+        resource: &ResourceUid,
+        event: &Event,
+    ) -> Result<DeleteOutcome> {
         self.call(IndexRequest::Delete {
+            partition: partition.clone(),
             resource: resource.clone(),
             event: event.clone(),
         })
@@ -319,7 +329,7 @@ impl IndexStore for FfiIndexStore {
         self.call(IndexRequest::PruneEvents { up_to }).await
     }
 
-    async fn stored_bytes(&self) -> Result<BTreeMap<String, u64>> {
+    async fn stored_bytes(&self) -> Result<Vec<StoredBytes>> {
         self.call(IndexRequest::StoredBytes).await
     }
 
@@ -332,10 +342,12 @@ impl IndexStore for FfiIndexStore {
 
     async fn update_extra(
         &self,
+        partition: &Partition,
         instance: &SopInstanceUid,
         attributes: &DicomJsonObject,
     ) -> Result<()> {
         self.call(IndexRequest::UpdateExtra {
+            partition: partition.clone(),
             instance: instance.clone(),
             attributes: attributes.clone(),
         })

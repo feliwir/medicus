@@ -8,12 +8,12 @@ use medicus_core::TagExt as _;
 use medicus_core::capability::index::{DicomJsonObject, ExtraTagState, ExtraTagStatus};
 use medicus_core::query::values::{fold, normalize, sortable_lower, sortable_upper};
 use medicus_core::query::{Key, MatchOptions, Matcher, OrderKey, Query};
-use medicus_core::{Error, QueryLevel, Result, Tag, VR};
+use medicus_core::{Error, Partition, QueryLevel, Result, Tag, VR};
 use serde_json::{Value, json};
 
 use crate::extra;
 use crate::schema::{
-    COLUMNS, Column, Storage, column, from_clause, id_expr, is_computed, size_expr,
+    COLUMNS, Column, Storage, column, from_clause, id_expr, is_computed, size_expr, table_alias,
 };
 use crate::sql::{Cell, CellKind, Dialect, Stmt};
 
@@ -61,7 +61,12 @@ fn kind(c: &Column) -> CellKind {
     }
 }
 
-pub(crate) fn compile(dialect: Dialect, q: &Query, extras: &[ExtraTagStatus]) -> Result<Compiled> {
+pub(crate) fn compile(
+    dialect: Dialect,
+    partition: &Partition,
+    q: &Query,
+    extras: &[ExtraTagStatus],
+) -> Result<Compiled> {
     let select = selected(q.level);
     let extra_levels: Vec<QueryLevel> = QueryLevel::ALL
         .into_iter()
@@ -75,7 +80,9 @@ pub(crate) fn compile(dialect: Dialect, q: &Query, extras: &[ExtraTagStatus]) ->
     exprs.extend(extra_levels.iter().map(|l| extra::select_expr(*l, dialect)));
     stmt.push(&exprs.join(", "));
     stmt.push(from_clause(q.level));
-    stmt.push(" WHERE 1=1");
+    // Child rows always share their parents' partition, so the level's own table decides.
+    stmt.push(&format!(" WHERE {}.partition = ", table_alias(q.level)))
+        .bind(partition.as_str());
 
     let mut unfiltered = Vec::new();
     for key in q.constraints() {
@@ -412,29 +419,34 @@ mod tests {
             .with_key(key(tags::STUDY_DATE, VR::DA, "20240101-20240131"))
             .with_key(key(tags::MODALITIES_IN_STUDY, VR::CS, "CT\\MR"))
             .with_key(key(tags::ACCESSION_NUMBER, VR::SH, ""));
-        let c = compile(Dialect::Postgres, &q, &[]).unwrap();
+        let c = compile(Dialect::Postgres, &Partition::default_partition(), &q, &[]).unwrap();
         let sql = &c.stmt.sql;
+        // $1 is the partition: every query is confined to one.
+        assert!(sql.contains("WHERE st.partition = $1 AND"), "{sql}");
+        assert_eq!(c.stmt.args[0], Cell::from(Partition::DEFAULT));
         assert!(
-            sql.contains("p.patient_name_folded LIKE $1 ESCAPE"),
+            sql.contains("p.patient_name_folded LIKE $2 ESCAPE"),
             "{sql}"
         );
         assert!(
-            sql.contains("st.study_date >= $2 AND st.study_date <= $3"),
+            sql.contains("st.study_date >= $3 AND st.study_date <= $4"),
             "{sql}"
         );
-        assert!(sql.contains("EXISTS (SELECT 1 FROM series m WHERE m.study_fk = st.id AND (m.modality = $4 OR m.modality = $5))"), "{sql}");
-        assert_eq!(c.stmt.args[0], Cell::from("doe%"));
+        assert!(sql.contains("EXISTS (SELECT 1 FROM series m WHERE m.study_fk = st.id AND (m.modality = $5 OR m.modality = $6))"), "{sql}");
+        assert_eq!(c.stmt.args[1], Cell::from("doe%"));
         assert!(c.unfiltered.is_empty());
     }
 
     #[test]
     fn lower_level_keys_are_rejected_and_unknown_keys_reported() {
         let q = Query::new(QueryLevel::Study).with_key(key(tags::MODALITY, VR::CS, "CT"));
-        assert!(compile(Dialect::Sqlite, &q, &[]).is_err());
+        assert!(compile(Dialect::Sqlite, &Partition::default_partition(), &q, &[]).is_err());
         let other = Tag(0x0018, 0x0050);
         let q = Query::new(QueryLevel::Instance).with_key(key(other, VR::DS, "1.5"));
         assert_eq!(
-            compile(Dialect::Sqlite, &q, &[]).unwrap().unfiltered,
+            compile(Dialect::Sqlite, &Partition::default_partition(), &q, &[])
+                .unwrap()
+                .unfiltered,
             vec![other]
         );
     }
@@ -443,7 +455,7 @@ mod tests {
     fn glob_escaping() {
         let q =
             Query::new(QueryLevel::Study).with_key(key(tags::STUDY_DESCRIPTION, VR::LO, "[a]*"));
-        let c = compile(Dialect::Sqlite, &q, &[]).unwrap();
-        assert_eq!(c.stmt.args[0], Cell::from("[[]a]*"));
+        let c = compile(Dialect::Sqlite, &Partition::default_partition(), &q, &[]).unwrap();
+        assert_eq!(c.stmt.args[1], Cell::from("[[]a]*"));
     }
 }

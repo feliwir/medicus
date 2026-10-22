@@ -2,7 +2,6 @@
 
 use std::sync::Arc;
 
-use medicus_core::Result;
 use medicus_core::capability::index::{InstanceLocation, QueryResult, ResourceUid};
 use medicus_core::capability::{
     ByteStream, HostServices, Ingested, Job, JobKind, JobProgress, Peer,
@@ -10,10 +9,16 @@ use medicus_core::capability::{
 use medicus_core::event::Origin;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
+use medicus_core::{Partition, Result};
 use uuid::Uuid;
 
 use crate::archive::Archive;
 use crate::jobs::Jobs;
+
+/// Until host calls carry a node (ADR-0003), everything happens in the default partition.
+fn default() -> Partition {
+    Partition::default_partition()
+}
 
 #[derive(Debug)]
 pub(crate) struct NodeServices {
@@ -24,19 +29,19 @@ pub(crate) struct NodeServices {
 #[async_trait::async_trait]
 impl HostServices for NodeServices {
     async fn ingest(&self, data: ByteStream, origin: Origin) -> Result<Ingested> {
-        self.archive.ingest(data, origin).await
+        self.archive.ingest(&default(), data, origin).await
     }
 
     async fn query(&self, query: &Query) -> Result<QueryResult> {
-        self.archive.query(query).await
+        self.archive.query(&default(), query).await
     }
 
     async fn locate(&self, resource: &ResourceUid) -> Result<Vec<InstanceLocation>> {
-        self.archive.index.locate(resource).await
+        self.archive.index.locate(&default(), resource).await
     }
 
     async fn open_instance(&self, instance: &SopInstanceUid) -> Result<ByteStream> {
-        Ok(self.archive.retrieve(instance).await?.1)
+        Ok(self.archive.retrieve(&default(), instance).await?.1)
     }
 
     async fn peers(&self) -> Result<Vec<Peer>> {
@@ -44,7 +49,7 @@ impl HostServices for NodeServices {
     }
 
     async fn submit_job(&self, kind: JobKind) -> Result<Job> {
-        self.jobs.submit(kind).await
+        self.jobs.submit(&default(), kind).await
     }
 
     async fn job_progress(&self, job: Uuid, progress: JobProgress) -> Result<bool> {

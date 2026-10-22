@@ -12,7 +12,7 @@ use medicus_core::capability::index::ResourceUid;
 use medicus_core::capability::{Job, JobKind, JobProgress, JobState, Peer, RemoteNode};
 use medicus_core::event::{Event, EventKind, Origin};
 use medicus_core::uid::SopInstanceUid;
-use medicus_core::{Error, ErrorKind, Result};
+use medicus_core::{Error, ErrorKind, Partition, Result};
 use serde_json::json;
 use time::OffsetDateTime;
 use tokio::sync::Notify;
@@ -96,7 +96,7 @@ impl Jobs {
     }
 
     /// Queues a job; it runs as soon as a slot is free.
-    pub(crate) async fn submit(&self, kind: JobKind) -> Result<Job> {
+    pub(crate) async fn submit(&self, partition: &Partition, kind: JobKind) -> Result<Job> {
         match &kind {
             JobKind::Send { peer, resources } => {
                 self.resolve(peer)?;
@@ -105,7 +105,7 @@ impl Jobs {
                 }
             }
         }
-        let job = Job::new(kind, self.cfg.max_attempts);
+        let job = Job::new(partition.clone(), kind, self.cfg.max_attempts);
         self.archive.index.put_job(&job).await?;
         tracing::info!(job = %job.id, "job queued");
         self.wake.notify_one();
@@ -303,7 +303,7 @@ impl Jobs {
         let (peer, node) = self.resolve(peer)?;
         let instances = match &job.pending {
             Some(pending) => pending.clone(),
-            None => self.instances(resources).await?,
+            None => self.instances(&job.partition, resources).await?,
         };
         job.progress = JobProgress {
             total: instances.len() as u64,
@@ -333,11 +333,15 @@ impl Jobs {
     }
 
     /// The stored instances of `resources`, without duplicates.
-    async fn instances(&self, resources: &[ResourceUid]) -> Result<Vec<SopInstanceUid>> {
+    async fn instances(
+        &self,
+        partition: &Partition,
+        resources: &[ResourceUid],
+    ) -> Result<Vec<SopInstanceUid>> {
         let mut seen = HashSet::new();
         let mut out = Vec::new();
         for resource in resources {
-            for location in self.archive.index.locate(resource).await? {
+            for location in self.archive.index.locate(partition, resource).await? {
                 if seen.insert(location.instance.clone()) {
                     out.push(location.instance);
                 }
@@ -412,7 +416,11 @@ mod tests {
                 component: "test".into(),
             };
             archive
-                .ingest(medicus_testkit::stream(&file, 4096), origin)
+                .ingest(
+                    &medicus_core::Partition::default_partition(),
+                    medicus_testkit::stream(&file, 4096),
+                    origin,
+                )
                 .await
                 .unwrap();
         }
@@ -455,7 +463,10 @@ mod tests {
         let (jobs, flaky) = engine(dir.path()).await;
         let stop = CancellationToken::new();
         let runner = tokio::spawn(jobs.clone().run(stop.clone()));
-        let job = jobs.submit(send_study()).await.unwrap();
+        let job = jobs
+            .submit(&medicus_core::Partition::default_partition(), send_study())
+            .await
+            .unwrap();
         let done = wait(&jobs, job.id, JobState::Succeeded).await;
         assert_eq!(done.attempts, 2);
         let sent = flaky.sent.lock().unwrap().clone();
@@ -477,11 +488,17 @@ mod tests {
             )],
         };
         assert_eq!(
-            jobs.submit(unknown).await.unwrap_err().kind,
+            jobs.submit(&medicus_core::Partition::default_partition(), unknown)
+                .await
+                .unwrap_err()
+                .kind,
             ErrorKind::NotFound
         );
         // Without a running scheduler the job stays queued.
-        let job = jobs.submit(send_study()).await.unwrap();
+        let job = jobs
+            .submit(&medicus_core::Partition::default_partition(), send_study())
+            .await
+            .unwrap();
         assert_eq!(
             jobs.cancel(job.id).await.unwrap().state,
             JobState::Cancelled
@@ -493,7 +510,10 @@ mod tests {
     async fn interrupted_jobs_are_requeued() {
         let dir = tempfile::tempdir().unwrap();
         let (jobs, flaky) = engine(dir.path()).await;
-        let job = jobs.submit(send_study()).await.unwrap();
+        let job = jobs
+            .submit(&medicus_core::Partition::default_partition(), send_study())
+            .await
+            .unwrap();
         // A crash after claiming leaves the job running.
         let claimed = jobs
             .archive

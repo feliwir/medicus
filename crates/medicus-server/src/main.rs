@@ -31,6 +31,9 @@ enum Command {
         /// Files ingested concurrently.
         #[arg(long, default_value_t = 4)]
         concurrency: usize,
+        /// Partition to import into.
+        #[arg(long, default_value = medicus_core::Partition::DEFAULT)]
+        partition: medicus_core::Partition,
     },
 }
 
@@ -104,10 +107,18 @@ fn main() -> anyhow::Result<()> {
             init_tracing(&cfg.log);
             runtime()?.block_on(run(cfg))
         }
-        Command::Import { path, concurrency } => {
+        Command::Import {
+            path,
+            concurrency,
+            partition,
+        } => {
             init_tracing(&cfg.log);
-            let report = runtime()?
-                .block_on(async { Node::open(cfg).await?.import(&path, concurrency).await })?;
+            let report = runtime()?.block_on(async {
+                Node::open(cfg)
+                    .await?
+                    .import(&partition, &path, concurrency)
+                    .await
+            })?;
             let out = serde_json::to_string_pretty(&report)?;
             #[allow(clippy::print_stdout)] // the command's output
             {

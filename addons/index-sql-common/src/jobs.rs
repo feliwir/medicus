@@ -23,9 +23,10 @@ fn decode(rows: Vec<Vec<Cell>>) -> Result<Vec<Job>> {
 async fn write<T: Tx>(tx: &mut T, job: &Job) -> Result<()> {
     let body = serde_json::to_string(job).map_err(|e| Error::internal(e.to_string()))?;
     let mut s = Stmt::new(tx.dialect());
-    s.push("INSERT INTO jobs (id, state, created_at, not_before, body) VALUES ")
+    s.push("INSERT INTO jobs (id, partition, state, created_at, not_before, body) VALUES ")
         .bind_list([
             Cell::from(job.id.to_string()),
+            Cell::from(job.partition.as_str()),
             Cell::from(job.state.as_str()),
             Cell::Int(millis(job.created_at)),
             Cell::Int(millis(job.not_before)),

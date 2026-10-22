@@ -205,7 +205,14 @@ mod tests {
 
     async fn ingest(archive: &Archive, sop: &str) {
         let file = InstanceBuilder::new("1.2.3", "1.2.3.1", sop).build();
-        archive.ingest(stream(&file, 4096), origin()).await.unwrap();
+        archive
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                stream(&file, 4096),
+                origin(),
+            )
+            .await
+            .unwrap();
     }
 
     async fn wait_for(rec: &Recorder, n: usize) -> Vec<(u64, EventKind)> {
@@ -296,7 +303,14 @@ mod tests {
         let study = medicus_core::capability::index::ResourceUid::Study(
             medicus_core::uid::StudyInstanceUid::parse("1.2.3").unwrap(),
         );
-        archive.delete(&study, origin()).await.unwrap();
+        archive
+            .delete(
+                &medicus_core::Partition::default_partition(),
+                &study,
+                origin(),
+            )
+            .await
+            .unwrap();
         let seen = wait_for(&rec, 1).await;
         assert_eq!(seen, [(2, EventKind::StudyDeleted)]);
         for _ in 0..1000 {

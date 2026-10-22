@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::Partition;
 use crate::capability::host::Peer;
 use crate::capability::index::ResourceUid;
 use crate::error::Result;
@@ -62,6 +63,8 @@ pub struct JobProgress {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Job {
     pub id: Uuid,
+    /// The partition the job's data belongs to (for a send: the source).
+    pub partition: Partition,
     #[serde(flatten)]
     pub kind: JobKind,
     pub state: JobState,
@@ -86,10 +89,11 @@ pub struct Job {
 }
 
 impl Job {
-    pub fn new(kind: JobKind, max_attempts: u32) -> Self {
+    pub fn new(partition: Partition, kind: JobKind, max_attempts: u32) -> Self {
         let now = OffsetDateTime::now_utc();
         Self {
             id: Uuid::now_v7(),
+            partition,
             kind,
             state: JobState::Queued,
             attempts: 0,
@@ -127,6 +131,7 @@ mod tests {
     #[test]
     fn transaction_uids_round_trip() {
         let job = Job::new(
+            Partition::default_partition(),
             JobKind::Send {
                 peer: "p".into(),
                 resources: Vec::new(),

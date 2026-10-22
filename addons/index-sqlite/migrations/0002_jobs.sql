@@ -2,6 +2,7 @@
 -- exist for scheduling and listing. Times are Unix milliseconds.
 CREATE TABLE jobs (
     id         TEXT PRIMARY KEY,
+    partition  TEXT NOT NULL,
     state      TEXT NOT NULL,
     created_at INTEGER NOT NULL,
     not_before INTEGER NOT NULL,

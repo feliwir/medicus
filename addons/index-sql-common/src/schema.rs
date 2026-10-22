@@ -149,6 +149,16 @@ pub fn from_clause(level: QueryLevel) -> &'static str {
     }
 }
 
+/// Alias of the level's table in [`from_clause`].
+pub fn table_alias(level: QueryLevel) -> &'static str {
+    match level {
+        QueryLevel::Patient => "p",
+        QueryLevel::Study => "st",
+        QueryLevel::Series => "se",
+        QueryLevel::Instance => "i",
+    }
+}
+
 /// Primary key expression of the level's table.
 pub fn id_expr(level: QueryLevel) -> &'static str {
     match level {

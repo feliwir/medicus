@@ -19,19 +19,18 @@ mod query;
 mod write;
 
 use medicus_core::TagExt as _;
-use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
 use medicus_core::capability::index::{
     DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagState, ExtraTagStatus,
-    InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome,
+    InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome, StoredBytes,
 };
 use medicus_core::capability::{IndexStore, Job, JobState};
 use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
-use medicus_core::{Error, Result};
+use medicus_core::{Error, Partition, Result};
 use medicus_core::{Tag, VR};
 
 pub use sql::{Backend, Cell, CellKind, Dialect, Stmt, Tx};
@@ -133,9 +132,9 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         Ok(outcome)
     }
 
-    async fn query(&self, query: &Query) -> Result<QueryResult> {
+    async fn query(&self, partition: &Partition, query: &Query) -> Result<QueryResult> {
         let extras = self.extras().await?;
-        let compiled = query::compile(self.backend.dialect(), query, &extras)?;
+        let compiled = query::compile(self.backend.dialect(), partition, query, &extras)?;
         let mut tx = self.backend.begin_read().await?;
         let mut rows = tx.fetch(&compiled.stmt, &compiled.kinds).await?;
         let has_more = compiled.limit.is_some_and(|l| rows.len() > l as usize);
@@ -152,14 +151,23 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         })
     }
 
-    async fn locate(&self, resource: &ResourceUid) -> Result<Vec<InstanceLocation>> {
+    async fn locate(
+        &self,
+        partition: &Partition,
+        resource: &ResourceUid,
+    ) -> Result<Vec<InstanceLocation>> {
         let mut tx = self.backend.begin_read().await?;
-        write::locate(&mut tx, resource).await
+        write::locate(&mut tx, partition, resource).await
     }
 
-    async fn delete(&self, resource: &ResourceUid, event: &Event) -> Result<DeleteOutcome> {
+    async fn delete(
+        &self,
+        partition: &Partition,
+        resource: &ResourceUid,
+        event: &Event,
+    ) -> Result<DeleteOutcome> {
         let mut tx = self.backend.begin_write().await?;
-        let outcome = write::delete(&mut tx, resource, event).await?;
+        let outcome = write::delete(&mut tx, partition, resource, event).await?;
         tx.commit().await?;
         Ok(outcome)
     }
@@ -242,16 +250,25 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         Ok(n)
     }
 
-    async fn stored_bytes(&self) -> Result<BTreeMap<String, u64>> {
+    async fn stored_bytes(&self) -> Result<Vec<StoredBytes>> {
         let mut tx = self.backend.begin_read().await?;
         let s = Stmt::raw(
             self.backend.dialect(),
-            "SELECT blob_store, CAST(SUM(size) AS BIGINT) FROM instances GROUP BY blob_store",
+            "SELECT partition, blob_store, CAST(SUM(size) AS BIGINT) FROM instances \
+             GROUP BY partition, blob_store ORDER BY partition, blob_store",
         );
-        let mut out = BTreeMap::new();
-        for row in tx.fetch(&s, &[CellKind::Text, CellKind::Int]).await? {
-            if let (Some(store), Some(bytes)) = (row[0].text(), row[1].int()) {
-                *out.entry(store.to_owned()).or_insert(0) += u64::try_from(bytes).unwrap_or(0);
+        let kinds = [CellKind::Text, CellKind::Text, CellKind::Int];
+        let mut out = Vec::new();
+        for row in tx.fetch(&s, &kinds).await? {
+            if let (Some(partition), Some(store), Some(bytes)) =
+                (row[0].text(), row[1].text(), row[2].int())
+            {
+                out.push(StoredBytes {
+                    partition: Partition::parse(partition)
+                        .map_err(|_| Error::internal("index contains an invalid partition"))?,
+                    store: store.to_owned(),
+                    bytes: u64::try_from(bytes).unwrap_or(0),
+                });
             }
         }
         Ok(out)
@@ -302,12 +319,13 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
 
     async fn update_extra(
         &self,
+        partition: &Partition,
         instance: &SopInstanceUid,
         attributes: &DicomJsonObject,
     ) -> Result<()> {
         let extras = self.extras().await?;
         let mut tx = self.backend.begin_write().await?;
-        write::update_extra(&mut tx, instance, attributes, &extras).await?;
+        write::update_extra(&mut tx, partition, instance, attributes, &extras).await?;
         tx.commit().await
     }
 

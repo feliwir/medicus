@@ -72,11 +72,13 @@ impl BlobKey {
     ///
     /// The fan-out uses the *random* tail of a `UUIDv7` (the head is a timestamp and would put all
     /// recent objects into the same directory), while the full UUID keeps keys roughly time-ordered.
-    pub fn generate(kind: BlobKind) -> Self {
+    /// A new unique key below the partition's prefix (`<partition>/<fan-out>/<id>.<kind>`), so
+    /// that partitions never share keys and can be told apart in the store.
+    pub fn generate(partition: &crate::Partition, kind: BlobKind) -> Self {
         let id = Uuid::now_v7().simple().to_string();
         let n = id.len();
         Self(format!(
-            "{}/{}/{id}.{}",
+            "{partition}/{}/{}/{id}.{}",
             &id[n - 2..],
             &id[n - 4..n - 2],
             kind.suffix()
@@ -119,14 +121,16 @@ mod tests {
 
     #[test]
     fn generated_keys_are_valid_and_fanned_out() {
-        let a = BlobKey::generate(BlobKind::Instance);
-        let b = BlobKey::generate(BlobKind::Instance);
+        let partition = crate::Partition::parse("tenant-a").unwrap();
+        let a = BlobKey::generate(&partition, BlobKind::Instance);
+        let b = BlobKey::generate(&partition, BlobKind::Instance);
         assert_ne!(a, b);
         assert_eq!(BlobKey::parse(a.as_str()).unwrap(), a);
         let parts: Vec<_> = a.as_str().split('/').collect();
-        assert_eq!(parts.len(), 3);
-        assert_eq!(std::path::Path::new(parts[2]).extension().unwrap(), "dcm");
-        assert!(parts[2][..32].ends_with(&format!("{}{}", parts[1], parts[0])));
+        assert_eq!(parts.len(), 4);
+        assert_eq!(parts[0], "tenant-a");
+        assert_eq!(std::path::Path::new(parts[3]).extension().unwrap(), "dcm");
+        assert!(parts[3][..32].ends_with(&format!("{}{}", parts[2], parts[1])));
     }
 
     #[test]

@@ -303,7 +303,11 @@ mod tests {
             component: "test".into(),
         };
         archive
-            .ingest(medicus_testkit::stream(&file, 4096), origin)
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                medicus_testkit::stream(&file, 4096),
+                origin,
+            )
             .await
             .unwrap();
     }
@@ -434,7 +438,10 @@ mod tests {
             peer: "p".into(),
             resources: vec![],
         };
-        let missing = format!("/api/v1/jobs/{}", Job::new(kind, 1).transaction_uid());
+        let missing = format!(
+            "/api/v1/jobs/{}",
+            Job::new(medicus_core::Partition::default_partition(), kind, 1).transaction_uid()
+        );
         assert_eq!(
             send(&app, request("GET", &missing)).await.0,
             StatusCode::NOT_FOUND

@@ -5,12 +5,9 @@
 //! appends the corresponding event in the same transaction (PLAN §3.7), so subscribers never miss
 //! a change and never see a change that was rolled back.
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
-use crate::BlobKey;
 use crate::capability::job::{Job, JobState};
 use crate::error::Result;
 use crate::event::Event;
@@ -18,6 +15,7 @@ use crate::query::Query;
 use crate::uid::{
     SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid, TransferSyntaxUid,
 };
+use crate::{BlobKey, Partition};
 
 /// A DICOM JSON object (PS3.18 F): `{"GGGGEEEE": {"vr": .., "Value": [..]}, ..}`.
 pub type DicomJsonObject = serde_json::Map<String, serde_json::Value>;
@@ -45,6 +43,7 @@ pub enum DuplicatePolicy {
 /// Everything the index records about a newly stored instance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InstanceRecord {
+    pub partition: Partition,
     pub study: StudyInstanceUid,
     pub series: SeriesInstanceUid,
     pub instance: SopInstanceUid,
@@ -65,6 +64,7 @@ pub struct InstanceRecord {
 /// Where a stored instance is.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct InstanceLocation {
+    pub partition: Partition,
     pub study: StudyInstanceUid,
     pub series: SeriesInstanceUid,
     pub instance: SopInstanceUid,
@@ -156,6 +156,14 @@ pub struct QueryResult {
     pub unfiltered: Vec<crate::Tag>,
 }
 
+/// Bytes the index references in one blob store for one partition.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StoredBytes {
+    pub partition: Partition,
+    pub store: String,
+    pub bytes: u64,
+}
+
 #[async_trait]
 pub trait IndexStore: Send + Sync + 'static {
     /// Records an instance and, unless the outcome is `KeptExisting`, appends `event` (whose
@@ -167,14 +175,24 @@ pub trait IndexStore: Send + Sync + 'static {
         event: &Event,
     ) -> Result<StoreOutcome>;
 
-    async fn query(&self, query: &Query) -> Result<QueryResult>;
+    /// Runs a query within one partition (there are no queries across partitions).
+    async fn query(&self, partition: &Partition, query: &Query) -> Result<QueryResult>;
 
-    /// All instances of a resource. Empty if the resource does not exist.
-    async fn locate(&self, resource: &ResourceUid) -> Result<Vec<InstanceLocation>>;
+    /// All instances of a resource in `partition`. Empty if the resource does not exist.
+    async fn locate(
+        &self,
+        partition: &Partition,
+        resource: &ResourceUid,
+    ) -> Result<Vec<InstanceLocation>>;
 
-    /// Removes a resource (and parents that become empty) and appends `event` in the same
-    /// transaction. `NotFound` if it does not exist.
-    async fn delete(&self, resource: &ResourceUid, event: &Event) -> Result<DeleteOutcome>;
+    /// Removes a resource of `partition` (and parents that become empty) and appends `event` in
+    /// the same transaction. `NotFound` if it does not exist.
+    async fn delete(
+        &self,
+        partition: &Partition,
+        resource: &ResourceUid,
+        event: &Event,
+    ) -> Result<DeleteOutcome>;
 
     /// Appends an event that is not tied to a data change (e.g. `storage.full`).
     async fn append_event(&self, event: &Event) -> Result<u64>;
@@ -193,8 +211,8 @@ pub trait IndexStore: Send + Sync + 'static {
     /// Deletes events with `seq <= up_to`; returns how many were deleted.
     async fn prune_events(&self, up_to: u64) -> Result<u64>;
 
-    /// Bytes referenced per blob store, for quota accounting.
-    async fn stored_bytes(&self) -> Result<BTreeMap<String, u64>>;
+    /// Bytes referenced per partition and blob store, for quota accounting.
+    async fn stored_bytes(&self) -> Result<Vec<StoredBytes>>;
 
     /// Declares the configured extra tags (called at startup). Tags that are new on a non-empty
     /// index start as `Backfilling`; tags no longer configured are dropped. Standard attributes
@@ -205,6 +223,7 @@ pub trait IndexStore: Send + Sync + 'static {
     /// `attributes` (DICOM JSON); used by backfill jobs. `NotFound` if the instance is unknown.
     async fn update_extra(
         &self,
+        partition: &Partition,
         instance: &SopInstanceUid,
         attributes: &DicomJsonObject,
     ) -> Result<()>;
@@ -236,12 +255,15 @@ pub enum IndexRequest {
         event: Box<Event>,
     },
     Query {
+        partition: Partition,
         query: Query,
     },
     Locate {
+        partition: Partition,
         resource: ResourceUid,
     },
     Delete {
+        partition: Partition,
         resource: ResourceUid,
         event: Event,
     },
@@ -268,6 +290,7 @@ pub enum IndexRequest {
         tags: Vec<ExtraTag>,
     },
     UpdateExtra {
+        partition: Partition,
         instance: SopInstanceUid,
         attributes: DicomJsonObject,
     },

@@ -20,7 +20,7 @@ use core::ffi::c_void;
 /// Major ABI version. While it is 0, every minor change is breaking.
 pub const MD_ABI_MAJOR: u32 = 0;
 /// Minor ABI version.
-pub const MD_ABI_MINOR: u32 = 5;
+pub const MD_ABI_MINOR: u32 = 6;
 /// `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
 pub const MD_ABI_VERSION: u32 = (MD_ABI_MAJOR << 16) | MD_ABI_MINOR;
 

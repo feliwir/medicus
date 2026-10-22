@@ -215,6 +215,9 @@ pub struct Event {
     #[serde(with = "time::serde::rfc3339")]
     pub time: OffsetDateTime,
     pub kind: EventKind,
+    /// The partition the event concerns; `None` for node-wide events (e.g. `storage.full`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub partition: Option<crate::Partition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource: Option<ResourceRef>,
     pub origin: Origin,
@@ -232,10 +235,17 @@ impl Event {
             id: Uuid::now_v7(),
             time: OffsetDateTime::now_utc(),
             kind,
+            partition: None,
             resource: None,
             origin,
             detail: serde_json::Value::Null,
         }
+    }
+
+    #[must_use]
+    pub fn with_partition(mut self, partition: crate::Partition) -> Self {
+        self.partition = Some(partition);
+        self
     }
 
     #[must_use]

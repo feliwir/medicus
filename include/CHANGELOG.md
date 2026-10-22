@@ -3,7 +3,13 @@
 Versions refer to `MD_ABI_MAJOR.MD_ABI_MINOR`. While the major version is 0, every minor version
 is a breaking change.
 
-## 0.5 (unreleased)
+## 0.6 (unreleased)
+
+- Partitions (ADR-0003): index requests `query`, `locate`, `delete` and `update_extra` take a
+  `partition`; instance records and locations, events (`partition`) and jobs carry one;
+  `stored_bytes` returns `[{partition, store, bytes}]`.
+
+## 0.5
 
 - Added `MD_CAP_REMOTE_NODE` with `MdRemoteNodeVtable`: protocol clients for peers, registered
   under the protocol name. A single JSON `call` serves `echo` and `send` (send jobs).

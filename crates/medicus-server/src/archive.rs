@@ -11,7 +11,7 @@ use medicus_core::capability::index::{
 use medicus_core::capability::{BlobStore, ByteStream, IndexStore};
 use medicus_core::event::{Event, EventKind, Origin, ResourceRef};
 use medicus_core::uid::SopInstanceUid;
-use medicus_core::{Error, Result};
+use medicus_core::{Error, Partition, Result};
 use tokio::sync::watch;
 
 use crate::addons::Capabilities;
@@ -115,11 +115,12 @@ impl Archive {
     /// Opens an instance's Part 10 file.
     pub(crate) async fn retrieve(
         &self,
+        partition: &Partition,
         instance: &SopInstanceUid,
     ) -> Result<(InstanceLocation, ByteStream)> {
         let location = self
             .index
-            .locate(&ResourceUid::Instance(instance.clone()))
+            .locate(partition, &ResourceUid::Instance(instance.clone()))
             .await?
             .into_iter()
             .next()
@@ -136,6 +137,7 @@ impl Archive {
     #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) async fn delete(
         &self,
+        partition: &Partition,
         resource: &ResourceUid,
         origin: Origin,
     ) -> Result<DeleteOutcome> {
@@ -162,8 +164,10 @@ impl Archive {
                 },
             ),
         };
-        let event = Event::new(kind, origin).with_resource(reference);
-        let outcome = self.index.delete(resource, &event).await?;
+        let event = Event::new(kind, origin)
+            .with_partition(partition.clone())
+            .with_resource(reference);
+        let outcome = self.index.delete(partition, resource, &event).await?;
         self.events_committed(outcome.seq);
         for removed in &outcome.removed {
             self.delete_blob_best_effort(&removed.blob.store, &removed.blob.key)

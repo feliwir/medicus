@@ -299,9 +299,16 @@ async fn dispatch_index(
             policy,
             event,
         } => json(&index.store_instance(&record, policy, &event).await?),
-        IndexRequest::Query { query } => json(&index.query(&query).await?),
-        IndexRequest::Locate { resource } => json(&index.locate(&resource).await?),
-        IndexRequest::Delete { resource, event } => json(&index.delete(&resource, &event).await?),
+        IndexRequest::Query { partition, query } => json(&index.query(&partition, &query).await?),
+        IndexRequest::Locate {
+            partition,
+            resource,
+        } => json(&index.locate(&partition, &resource).await?),
+        IndexRequest::Delete {
+            partition,
+            resource,
+            event,
+        } => json(&index.delete(&partition, &resource, &event).await?),
         IndexRequest::AppendEvent { event } => json(&index.append_event(&event).await?),
         IndexRequest::EventsAfter { after, limit } => {
             json(&index.events_after(after, limit).await?)
@@ -317,9 +324,14 @@ async fn dispatch_index(
             json(&index.configure_extra_tags(&tags).await?)
         }
         IndexRequest::UpdateExtra {
+            partition,
             instance,
             attributes,
-        } => json(&index.update_extra(&instance, &attributes).await?),
+        } => json(
+            &index
+                .update_extra(&partition, &instance, &attributes)
+                .await?,
+        ),
         IndexRequest::MarkExtraReady { tag } => json(&index.mark_extra_ready(tag).await?),
         IndexRequest::PutJob { job } => json(&index.put_job(&job).await?),
         IndexRequest::GetJob { id } => json(&index.get_job(id).await?),

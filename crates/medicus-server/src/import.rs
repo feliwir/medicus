@@ -1,6 +1,7 @@
 //! `medicus import`: ingests DICOM Part 10 files from a directory tree through the normal ingest
 //! pipeline (events carry `origin = import`).
 
+use medicus_core::Partition;
 use std::collections::BTreeMap;
 use std::io::Read as _;
 use std::path::{Path, PathBuf};
@@ -90,7 +91,7 @@ enum Outcome {
     Failed(Error),
 }
 
-async fn import_one(archive: &Archive, path: PathBuf) -> Outcome {
+async fn import_one(archive: &Archive, partition: &Partition, path: PathBuf) -> Outcome {
     let p = path.clone();
     let skip = tokio::task::spawn_blocking(move || skip_reason(&p))
         .await
@@ -102,7 +103,7 @@ async fn import_one(archive: &Archive, path: PathBuf) -> Outcome {
         path: path.display().to_string(),
     };
     let result = match open(&path).await {
-        Ok(data) => archive.ingest(data, origin).await,
+        Ok(data) => archive.ingest(partition, data, origin).await,
         Err(e) => Err(e),
     };
     match result {
@@ -114,9 +115,10 @@ async fn import_one(archive: &Archive, path: PathBuf) -> Outcome {
     }
 }
 
-/// Imports all files below `root`, `concurrency` at a time.
+/// Imports all files below `root` into `partition`, `concurrency` at a time.
 pub(crate) async fn import(
     archive: &Archive,
+    partition: &Partition,
     root: &Path,
     concurrency: usize,
 ) -> anyhow::Result<ImportReport> {
@@ -127,7 +129,7 @@ pub(crate) async fn import(
         ..ImportReport::default()
     };
     let mut outcomes = futures::stream::iter(files)
-        .map(|path| import_one(archive, path))
+        .map(|path| import_one(archive, partition, path))
         .buffer_unordered(concurrency.max(1));
     while let Some(outcome) = outcomes.next().await {
         match outcome {

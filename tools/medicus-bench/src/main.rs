@@ -105,6 +105,7 @@ async fn main() -> anyhow::Result<()> {
                 let t = Instant::now();
                 archive
                     .ingest(
+                        &medicus_core::Partition::default_partition(),
                         medicus_testkit::stream(&file, chunk),
                         Origin::Internal {
                             component: "bench".into(),

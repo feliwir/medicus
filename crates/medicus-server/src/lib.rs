@@ -130,8 +130,13 @@ impl Node {
         }
     }
 
-    /// Imports the DICOM files below `path`, `concurrency` at a time.
-    pub async fn import(&self, path: &Path, concurrency: usize) -> anyhow::Result<ImportReport> {
-        import::import(&self.archive, path, concurrency).await
+    /// Imports the DICOM files below `path` into `partition`, `concurrency` at a time.
+    pub async fn import(
+        &self,
+        partition: &medicus_core::Partition,
+        path: &Path,
+        concurrency: usize,
+    ) -> anyhow::Result<ImportReport> {
+        import::import(&self.archive, partition, path, concurrency).await
     }
 }

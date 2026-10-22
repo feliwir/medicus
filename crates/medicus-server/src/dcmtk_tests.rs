@@ -177,7 +177,11 @@ async fn echoscu_and_storescu() {
 
     // The stored files carry the data sets exactly as DCMTK sent them; check one end to end.
     let sop: medicus_core::uid::SopInstanceUid = "1.2.3.2.1".parse().unwrap();
-    let (_, stream) = node.archive.retrieve(&sop).await.unwrap();
+    let (_, stream) = node
+        .archive
+        .retrieve(&medicus_core::Partition::default_partition(), &sop)
+        .await
+        .unwrap();
     let stored = medicus_testkit::read_all(stream).await;
     let obj = dicom_object::from_reader(&stored[128..]).unwrap();
     assert_eq!(obj.meta().media_storage_sop_instance_uid(), "1.2.3.2.1");
@@ -340,7 +344,11 @@ async fn ingest_patients(node: &Node) {
             component: "test".into(),
         };
         node.archive
-            .ingest(medicus_testkit::stream(&file, 4096), origin)
+            .ingest(
+                &medicus_core::Partition::default_partition(),
+                medicus_testkit::stream(&file, 4096),
+                origin,
+            )
             .await
             .unwrap();
     }
@@ -575,7 +583,11 @@ async fn movescu_and_getscu_retrieve() {
     );
     // The data set arrives as stored.
     let sop: medicus_core::uid::SopInstanceUid = "1.9.2.2.2".parse().unwrap();
-    let (_, stored) = node.archive.retrieve(&sop).await.unwrap();
+    let (_, stored) = node
+        .archive
+        .retrieve(&medicus_core::Partition::default_partition(), &sop)
+        .await
+        .unwrap();
     let stored =
         dicom_object::from_reader(&medicus_testkit::read_all(stored).await[128..]).unwrap();
     let moved = std::fs::read_dir(&received_dir)
@@ -684,10 +696,13 @@ async fn send_jobs_to_storescp() {
     let study = |uid: &str| ResourceUid::Study(uid.parse().unwrap());
     let job = node
         .jobs
-        .submit(JobKind::Send {
-            peer: "dest".into(),
-            resources: vec![study("1.9.2"), study("1.9.1")],
-        })
+        .submit(
+            &medicus_core::Partition::default_partition(),
+            JobKind::Send {
+                peer: "dest".into(),
+                resources: vec![study("1.9.2"), study("1.9.1")],
+            },
+        )
         .await
         .unwrap();
     let done = wait_for_job(&node, job.id, JobState::Succeeded).await;
@@ -700,10 +715,13 @@ async fn send_jobs_to_storescp() {
 
     let failing = node
         .jobs
-        .submit(JobKind::Send {
-            peer: "down".into(),
-            resources: vec![study("1.9.1")],
-        })
+        .submit(
+            &medicus_core::Partition::default_partition(),
+            JobKind::Send {
+                peer: "down".into(),
+                resources: vec![study("1.9.1")],
+            },
+        )
         .await
         .unwrap();
     let failed = wait_for_job(&node, failing.id, JobState::Failed).await;

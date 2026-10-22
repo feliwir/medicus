@@ -7,14 +7,14 @@ use dicom_dictionary_std::uids;
 use medicus_core::capability::IndexStore;
 use medicus_core::capability::index::{
     BlobRef, DicomJsonObject, Duplicate, DuplicatePolicy, ExtraTag, ExtraTagState, InstanceRecord,
-    ResourceUid,
+    ResourceUid, StoredBytes,
 };
 use medicus_core::event::{Event, EventKind, Origin};
 use medicus_core::query::{DicomJson, Key, MatchOptions, OrderBy, OrderKey, Query};
 use medicus_core::uid::{
     SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid, TransferSyntaxUid,
 };
-use medicus_core::{BlobKey, ErrorKind, QueryLevel, Tag, VR, tags};
+use medicus_core::{BlobKey, ErrorKind, Partition, QueryLevel, Tag, VR, tags};
 use serde_json::{Value, json};
 
 /// Builds DICOM JSON attributes from `(tag, value)` pairs, using the standard VRs.
@@ -51,6 +51,7 @@ pub fn record(
     ];
     values.extend_from_slice(extra);
     InstanceRecord {
+        partition: part(),
         study: StudyInstanceUid::parse(study).unwrap(),
         series: SeriesInstanceUid::parse(series).unwrap(),
         instance: SopInstanceUid::parse(sop).unwrap(),
@@ -60,7 +61,7 @@ pub fn record(
         size: 1000,
         blob: BlobRef {
             store: "local".into(),
-            key: BlobKey::generate(medicus_core::blob::BlobKind::Instance),
+            key: BlobKey::generate(&part(), medicus_core::blob::BlobKind::Instance),
         },
         header_length: 400,
     }
@@ -100,7 +101,7 @@ fn int_value(row: &DicomJsonObject, tag: Tag) -> Option<i64> {
 }
 
 async fn study_uids(index: &dyn IndexStore, q: &Query) -> BTreeSet<String> {
-    let r = index.query(q).await.unwrap();
+    let r = index.query(&part(), q).await.unwrap();
     r.rows
         .iter()
         .flat_map(|row| string_values(row, tags::STUDY_INSTANCE_UID))
@@ -108,6 +109,11 @@ async fn study_uids(index: &dyn IndexStore, q: &Query) -> BTreeSet<String> {
 }
 
 /// Runs all scenarios in order (they build on each other's data).
+/// The partition the suite's data lives in.
+fn part() -> Partition {
+    Partition::default_partition()
+}
+
 pub async fn suite(index: &dyn IndexStore) {
     assert_eq!(
         index.last_event_seq().await.unwrap(),
@@ -125,6 +131,129 @@ pub async fn suite(index: &dyn IndexStore) {
     deletion(index).await;
     counters_match_recount(index).await;
     jobs(index).await;
+    partitions(index).await;
+}
+
+/// Partitions are separate archives: the same UIDs live independently in each, and nothing is
+/// visible, counted or removed across them.
+async fn partitions(index: &dyn IndexStore) {
+    let a = Partition::parse("tenant-a").unwrap();
+    let b = Partition::parse("tenant-b").unwrap();
+    let in_partition = |partition: &Partition, sop: &str, modality: &str| {
+        let mut r = record(
+            "9.1",
+            "9.1.1",
+            sop,
+            uids::CT_IMAGE_STORAGE,
+            &[(tags::PATIENT_ID, "SAME"), (tags::MODALITY, modality)],
+        );
+        r.partition = partition.clone();
+        r
+    };
+    for (partition, sops, modality) in [
+        (&a, ["9.1.1.1", "9.1.1.2"].as_slice(), "CT"),
+        (&b, ["9.1.1.1"].as_slice(), "MR"),
+    ] {
+        for sop in sops {
+            let r = in_partition(partition, sop, modality);
+            let outcome = index
+                .store_instance(
+                    &r,
+                    DuplicatePolicy::Overwrite,
+                    &event(EventKind::InstanceStored),
+                )
+                .await
+                .unwrap();
+            assert_eq!(outcome.duplicate, Duplicate::None, "{partition} {sop}");
+        }
+    }
+    let studies = |partition: Partition| async move {
+        index
+            .query(
+                &partition,
+                &Query::new(QueryLevel::Study).with_key(Key::universal(
+                    tags::NUMBER_OF_STUDY_RELATED_INSTANCES,
+                    VR::IS,
+                )),
+            )
+            .await
+            .unwrap()
+            .rows
+    };
+    let rows_a = studies(a.clone()).await;
+    let rows_b = studies(b.clone()).await;
+    assert_eq!(rows_a.len(), 1);
+    assert_eq!(rows_b.len(), 1);
+    assert_eq!(
+        int_value(&rows_a[0], tags::NUMBER_OF_STUDY_RELATED_INSTANCES),
+        Some(2)
+    );
+    assert_eq!(
+        int_value(&rows_b[0], tags::NUMBER_OF_STUDY_RELATED_INSTANCES),
+        Some(1)
+    );
+    assert_eq!(string_values(&rows_b[0], tags::MODALITIES_IN_STUDY), ["MR"]);
+    let patients = index
+        .query(&b, &Query::new(QueryLevel::Patient))
+        .await
+        .unwrap()
+        .rows;
+    assert_eq!(
+        patients.len(),
+        1,
+        "same Patient ID, separate patient per partition"
+    );
+    // Nothing of the default partition's data is visible in a new partition, and vice versa.
+    assert!(
+        index
+            .query(&a, &Query::new(QueryLevel::Study))
+            .await
+            .unwrap()
+            .rows
+            .iter()
+            .all(|r| string_values(r, tags::STUDY_INSTANCE_UID) == ["9.1"])
+    );
+    assert!(
+        index
+            .locate(
+                &part(),
+                &ResourceUid::Study(StudyInstanceUid::parse("9.1").unwrap())
+            )
+            .await
+            .unwrap()
+            .is_empty()
+    );
+
+    let study = ResourceUid::Study(StudyInstanceUid::parse("9.1").unwrap());
+    let located = index.locate(&b, &study).await.unwrap();
+    assert_eq!(located.len(), 1);
+    assert_eq!(located[0].partition, b);
+    let bytes: Vec<_> = index
+        .stored_bytes()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|s| s.partition == a || s.partition == b)
+        .map(|s| (s.partition, s.bytes))
+        .collect();
+    assert_eq!(bytes, [(a.clone(), 2000), (b.clone(), 1000)]);
+
+    // Deleting in one partition leaves the other untouched.
+    let deleted = index
+        .delete(&a, &study, &event(EventKind::StudyDeleted))
+        .await
+        .unwrap();
+    assert_eq!(deleted.removed.len(), 2);
+    assert!(index.locate(&a, &study).await.unwrap().is_empty());
+    assert_eq!(index.locate(&b, &study).await.unwrap().len(), 1);
+    assert_eq!(
+        index
+            .delete(&a, &study, &event(EventKind::StudyDeleted))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
 }
 
 /// Jobs: stored and replaced whole, listed newest first, claimed once each and only when due.
@@ -139,9 +268,9 @@ async fn jobs(index: &dyn IndexStore) {
         )],
     };
     let now = OffsetDateTime::now_utc();
-    let mut first = Job::new(send("a"), 3);
+    let mut first = Job::new(part(), send("a"), 3);
     first.created_at = now - Duration::seconds(10);
-    let mut second = Job::new(send("b"), 3);
+    let mut second = Job::new(part(), send("b"), 3);
     second.created_at = now - Duration::seconds(5);
     second.not_before = now + Duration::hours(1);
     index.put_job(&first).await.unwrap();
@@ -198,7 +327,7 @@ async fn jobs(index: &dyn IndexStore) {
 /// equal a recount of what the index actually holds.
 async fn counters_match_recount(index: &dyn IndexStore) {
     let studies = index
-        .query(&Query::new(QueryLevel::Study))
+        .query(&part(), &Query::new(QueryLevel::Study))
         .await
         .unwrap()
         .rows;
@@ -206,7 +335,10 @@ async fn counters_match_recount(index: &dyn IndexStore) {
     for row in &studies {
         let uid = string_values(row, tags::STUDY_INSTANCE_UID).remove(0);
         let located = index
-            .locate(&ResourceUid::Study(StudyInstanceUid::parse(&uid).unwrap()))
+            .locate(
+                &part(),
+                &ResourceUid::Study(StudyInstanceUid::parse(&uid).unwrap()),
+            )
             .await
             .unwrap();
         let series: BTreeSet<&str> = located.iter().map(|l| l.series.as_str()).collect();
@@ -222,16 +354,17 @@ async fn counters_match_recount(index: &dyn IndexStore) {
         );
     }
     for row in index
-        .query(&Query::new(QueryLevel::Series))
+        .query(&part(), &Query::new(QueryLevel::Series))
         .await
         .unwrap()
         .rows
     {
         let uid = string_values(&row, tags::SERIES_INSTANCE_UID).remove(0);
         let located = index
-            .locate(&ResourceUid::Series(
-                SeriesInstanceUid::parse(&uid).unwrap(),
-            ))
+            .locate(
+                &part(),
+                &ResourceUid::Series(SeriesInstanceUid::parse(&uid).unwrap()),
+            )
             .await
             .unwrap();
         assert_eq!(
@@ -275,31 +408,39 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
         assert!(out.seq.is_some());
     }
     let study = |u: &str| ResourceUid::Study(StudyInstanceUid::parse(u).unwrap());
-    assert_eq!(index.locate(&study("1.1")).await.unwrap().len(), 3);
+    assert_eq!(index.locate(&part(), &study("1.1")).await.unwrap().len(), 3);
     assert_eq!(
         index
-            .locate(&ResourceUid::Series(
-                SeriesInstanceUid::parse("1.1.1").unwrap()
-            ))
+            .locate(
+                &part(),
+                &ResourceUid::Series(SeriesInstanceUid::parse("1.1.1").unwrap())
+            )
             .await
             .unwrap()
             .len(),
         2
     );
     let one = index
-        .locate(&ResourceUid::Instance(
-            SopInstanceUid::parse("1.1.2.1").unwrap(),
-        ))
+        .locate(
+            &part(),
+            &ResourceUid::Instance(SopInstanceUid::parse("1.1.2.1").unwrap()),
+        )
         .await
         .unwrap();
     assert_eq!(
         (one.len(), one[0].series.as_str(), one[0].size),
         (1, "1.1.2", 1000)
     );
-    assert!(index.locate(&study("9.9.9")).await.unwrap().is_empty());
+    assert!(
+        index
+            .locate(&part(), &study("9.9.9"))
+            .await
+            .unwrap()
+            .is_empty()
+    );
 
     let rows = index
-        .query(&study_query(&[(tags::STUDY_INSTANCE_UID, "1.1")]))
+        .query(&part(), &study_query(&[(tags::STUDY_INSTANCE_UID, "1.1")]))
         .await
         .unwrap()
         .rows;
@@ -331,7 +472,7 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
         )
         .unwrap(),
     );
-    let series = index.query(&q).await.unwrap().rows;
+    let series = index.query(&part(), &q).await.unwrap().rows;
     assert_eq!(series.len(), 2);
     assert_eq!(
         int_value(&series[0], tags::NUMBER_OF_SERIES_RELATED_INSTANCES),
@@ -348,7 +489,14 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
     assert!(study_uids(index, &by_mod("M?")).await.contains("1.1"));
 
     let bytes = index.stored_bytes().await.unwrap();
-    assert_eq!(bytes.get("local"), Some(&3000));
+    assert_eq!(
+        bytes,
+        [StoredBytes {
+            partition: part(),
+            store: "local".into(),
+            bytes: 3000
+        }]
+    );
 }
 
 async fn duplicates(index: &dyn IndexStore) {
@@ -397,12 +545,12 @@ async fn duplicates(index: &dyn IndexStore) {
     };
     assert_ne!(previous.blob, r.blob);
     let now = index
-        .locate(&ResourceUid::Instance(r.instance.clone()))
+        .locate(&part(), &ResourceUid::Instance(r.instance.clone()))
         .await
         .unwrap();
     assert_eq!(now[0].blob, r.blob);
     let rows = index
-        .query(&study_query(&[(tags::STUDY_INSTANCE_UID, "1.1")]))
+        .query(&part(), &study_query(&[(tags::STUDY_INSTANCE_UID, "1.1")]))
         .await
         .unwrap()
         .rows;
@@ -425,7 +573,10 @@ async fn duplicates(index: &dyn IndexStore) {
     assert_eq!(err.kind, ErrorKind::InvalidArgument);
     assert!(
         index
-            .locate(&ResourceUid::Study(StudyInstanceUid::parse("1.2").unwrap()))
+            .locate(
+                &part(),
+                &ResourceUid::Study(StudyInstanceUid::parse("1.2").unwrap())
+            )
             .await
             .unwrap()
             .is_empty()
@@ -578,7 +729,7 @@ async fn paging_and_order(index: &dyn IndexStore) {
         descending: true,
     }];
     q.limit = Some(2);
-    let page1 = index.query(&q).await.unwrap();
+    let page1 = index.query(&part(), &q).await.unwrap();
     assert!(page1.has_more);
     let dates: Vec<String> = page1
         .rows
@@ -587,7 +738,7 @@ async fn paging_and_order(index: &dyn IndexStore) {
         .collect();
     assert_eq!(dates, ["20240301", "20240220"]);
     q.offset = 4;
-    let last = index.query(&q).await.unwrap();
+    let last = index.query(&part(), &q).await.unwrap();
     assert_eq!((last.rows.len(), last.has_more), (1, false));
 }
 
@@ -598,14 +749,14 @@ async fn unfiltered_and_level_errors(index: &dyn IndexStore) {
         .push(Key::parse(slice_thickness, VR::DS, "1.5", &MatchOptions::default()).unwrap());
     q.keys.push(Key::universal(Tag(0x0028, 0x0010), VR::US));
     assert_eq!(
-        index.query(&q).await.unwrap().unfiltered,
+        index.query(&part(), &q).await.unwrap().unfiltered,
         vec![slice_thickness]
     );
 
     let below = study_query(&[])
         .with_key(Key::parse(tags::MODALITY, VR::CS, "CT", &MatchOptions::default()).unwrap());
     assert_eq!(
-        index.query(&below).await.unwrap_err().kind,
+        index.query(&part(), &below).await.unwrap_err().kind,
         ErrorKind::InvalidArgument
     );
 }
@@ -639,12 +790,12 @@ async fn events_and_cursors(index: &dyn IndexStore) {
 async fn deletion(index: &dyn IndexStore) {
     let series = ResourceUid::Series(SeriesInstanceUid::parse("1.1.2").unwrap());
     let out = index
-        .delete(&series, &event(EventKind::SeriesDeleted))
+        .delete(&part(), &series, &event(EventKind::SeriesDeleted))
         .await
         .unwrap();
     assert_eq!(out.removed.len(), 1);
     let rows = index
-        .query(&study_query(&[(tags::STUDY_INSTANCE_UID, "1.1")]))
+        .query(&part(), &study_query(&[(tags::STUDY_INSTANCE_UID, "1.1")]))
         .await
         .unwrap()
         .rows;
@@ -661,7 +812,7 @@ async fn deletion(index: &dyn IndexStore) {
     let study = ResourceUid::Study(StudyInstanceUid::parse("1.1").unwrap());
     assert_eq!(
         index
-            .delete(&study, &event(EventKind::StudyDeleted))
+            .delete(&part(), &study, &event(EventKind::StudyDeleted))
             .await
             .unwrap()
             .removed
@@ -670,7 +821,7 @@ async fn deletion(index: &dyn IndexStore) {
     );
     assert_eq!(
         index
-            .delete(&study, &event(EventKind::StudyDeleted))
+            .delete(&part(), &study, &event(EventKind::StudyDeleted))
             .await
             .unwrap_err()
             .kind,
@@ -681,7 +832,12 @@ async fn deletion(index: &dyn IndexStore) {
         .keys
         .push(Key::parse(tags::PATIENT_ID, VR::LO, "H-1", &MatchOptions::default()).unwrap());
     assert!(
-        index.query(&patients).await.unwrap().rows.is_empty(),
+        index
+            .query(&part(), &patients)
+            .await
+            .unwrap()
+            .rows
+            .is_empty(),
         "empty patient removed"
     );
 
@@ -689,7 +845,7 @@ async fn deletion(index: &dyn IndexStore) {
     let mut p1 = Query::new(QueryLevel::Patient);
     p1.keys
         .push(Key::parse(tags::PATIENT_ID, VR::LO, "P1", &MatchOptions::default()).unwrap());
-    let rows = index.query(&p1).await.unwrap().rows;
+    let rows = index.query(&part(), &p1).await.unwrap().rows;
     assert_eq!(
         int_value(&rows[0], tags::NUMBER_OF_PATIENT_RELATED_STUDIES),
         Some(2)
@@ -778,7 +934,7 @@ pub async fn extra_tags_on_empty_index(index: &dyn IndexStore) {
         .await
         .unwrap();
     let q = instance_query(&[(SLICE_THICKNESS, VR::DS, "2.50")]);
-    let res = index.query(&q).await.unwrap();
+    let res = index.query(&part(), &q).await.unwrap();
     assert!(res.unfiltered.is_empty());
     assert_eq!(res.rows.len(), 1);
     // Extra tags are returned in their original DICOM JSON form.
@@ -812,7 +968,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     );
     let q = instance_query(&[(SLICE_THICKNESS, VR::DS, "1.5")]);
     assert_eq!(
-        index.query(&q).await.unwrap().unfiltered,
+        index.query(&part(), &q).await.unwrap().unfiltered,
         vec![SLICE_THICKNESS]
     );
     for t in extra_config() {
@@ -924,7 +1080,7 @@ async fn extra_tags(index: &dyn IndexStore) {
             )
             .unwrap(),
         );
-        let res = index.query(&q).await.unwrap();
+        let res = index.query(&part(), &q).await.unwrap();
         assert!(
             res.unfiltered.is_empty(),
             "{keys:?} not evaluated by the index"
@@ -956,7 +1112,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     let mut sq = Query::new(QueryLevel::Series);
     sq.keys
         .push(Key::parse(PROTOCOL_NAME, VR::LO, "Scout*", &MatchOptions::default()).unwrap());
-    let rows = index.query(&sq).await.unwrap().rows;
+    let rows = index.query(&part(), &sq).await.unwrap().rows;
     assert_eq!(
         rows.iter()
             .flat_map(|r| string_values(r, tags::SERIES_INSTANCE_UID))
@@ -967,7 +1123,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     bad.keys
         .push(Key::parse(SLICE_THICKNESS, VR::DS, "1", &MatchOptions::default()).unwrap());
     assert_eq!(
-        index.query(&bad).await.unwrap_err().kind,
+        index.query(&part(), &bad).await.unwrap_err().kind,
         ErrorKind::InvalidArgument
     );
 
@@ -980,9 +1136,9 @@ async fn extra_tags(index: &dyn IndexStore) {
         &["9"],
     )
     .attributes;
-    index.update_extra(&old, &attrs).await.unwrap();
+    index.update_extra(&part(), &old, &attrs).await.unwrap();
     let rows = index
-        .query(&instance_query(&[(SLICE_THICKNESS, VR::DS, "9")]))
+        .query(&part(), &instance_query(&[(SLICE_THICKNESS, VR::DS, "9")]))
         .await
         .unwrap()
         .rows;
@@ -994,7 +1150,11 @@ async fn extra_tags(index: &dyn IndexStore) {
     );
     let missing = SopInstanceUid::parse("9.9.9.9").unwrap();
     assert_eq!(
-        index.update_extra(&missing, &attrs).await.unwrap_err().kind,
+        index
+            .update_extra(&part(), &missing, &attrs)
+            .await
+            .unwrap_err()
+            .kind,
         ErrorKind::NotFound
     );
 
@@ -1009,7 +1169,7 @@ async fn extra_tags(index: &dyn IndexStore) {
         )
         .unwrap(),
     );
-    let row = &index.query(&one).await.unwrap().rows[0];
+    let row = &index.query(&part(), &one).await.unwrap().rows[0];
     assert_eq!(
         row[&IMAGE_TYPE.json_key()]["Value"],
         json!(["ORIGINAL", "PRIMARY", "LOCALIZER"])
@@ -1026,10 +1186,10 @@ async fn extra_tags(index: &dyn IndexStore) {
         .await
         .unwrap();
     assert_eq!(
-        index.query(&q).await.unwrap().unfiltered,
+        index.query(&part(), &q).await.unwrap().unfiltered,
         vec![SLICE_THICKNESS]
     );
-    let row = &index.query(&one).await.unwrap().rows[0];
+    let row = &index.query(&part(), &one).await.unwrap().rows[0];
     assert!(
         !row.contains_key(&SLICE_THICKNESS.json_key()),
         "dropped tags are not returned"

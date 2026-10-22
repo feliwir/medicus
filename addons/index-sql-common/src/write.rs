@@ -8,7 +8,7 @@ use medicus_core::event::Event;
 use medicus_core::query::Attributes;
 use medicus_core::query::values::{fold, normalize, sortable_lower};
 use medicus_core::uid::Uid;
-use medicus_core::{BlobKey, Error, ErrorKind, QueryLevel, Result, Tag, VR, tags};
+use medicus_core::{BlobKey, Error, ErrorKind, Partition, QueryLevel, Result, Tag, VR, tags};
 use time::OffsetDateTime;
 
 use crate::extra;
@@ -115,7 +115,7 @@ struct ExistingInstance {
 }
 
 const LOCATION_COLUMNS: &str = "i.id, st.study_uid, se.series_uid, i.sop_uid, i.sop_class, i.transfer_syntax, \
-     i.size, i.blob_store, i.blob_key, i.header_length";
+     i.size, i.blob_store, i.blob_key, i.header_length, i.partition";
 const LOCATION_KINDS: &[CellKind] = &[
     CellKind::Int,
     CellKind::Text,
@@ -127,6 +127,7 @@ const LOCATION_KINDS: &[CellKind] = &[
     CellKind::Text,
     CellKind::Text,
     CellKind::Int,
+    CellKind::Text,
 ];
 const LOCATION_FROM: &str = " FROM instances i JOIN series se ON se.id = i.series_fk JOIN studies st ON st.id = se.study_fk";
 
@@ -155,6 +156,9 @@ fn decode_location(row: &[Cell]) -> Result<ExistingInstance> {
     Ok(ExistingInstance {
         id: int(0).ok_or_else(|| corrupt("id"))?,
         location: InstanceLocation {
+            partition: text(10)
+                .and_then(|p| Partition::parse(&p).ok())
+                .ok_or_else(|| corrupt("partition"))?,
             study: uid(1)?.into(),
             series: uid(2)?.into(),
             instance: uid(3)?.into(),
@@ -169,24 +173,31 @@ fn decode_location(row: &[Cell]) -> Result<ExistingInstance> {
 
 pub(crate) async fn locate<T: Tx>(
     tx: &mut T,
+    partition: &Partition,
     resource: &ResourceUid,
 ) -> Result<Vec<InstanceLocation>> {
-    Ok(locate_rows(tx, resource)
+    Ok(locate_rows(tx, partition, resource)
         .await?
         .into_iter()
         .map(|e| e.location)
         .collect())
 }
 
-async fn locate_rows<T: Tx>(tx: &mut T, resource: &ResourceUid) -> Result<Vec<ExistingInstance>> {
+async fn locate_rows<T: Tx>(
+    tx: &mut T,
+    partition: &Partition,
+    resource: &ResourceUid,
+) -> Result<Vec<ExistingInstance>> {
     let mut stmt = Stmt::new(tx.dialect());
     stmt.push("SELECT ")
         .push(LOCATION_COLUMNS)
-        .push(LOCATION_FROM);
+        .push(LOCATION_FROM)
+        .push(" WHERE i.partition = ")
+        .bind(partition.as_str());
     match resource {
-        ResourceUid::Study(uid) => stmt.push(" WHERE st.study_uid = ").bind(uid.as_str()),
-        ResourceUid::Series(uid) => stmt.push(" WHERE se.series_uid = ").bind(uid.as_str()),
-        ResourceUid::Instance(uid) => stmt.push(" WHERE i.sop_uid = ").bind(uid.as_str()),
+        ResourceUid::Study(uid) => stmt.push(" AND st.study_uid = ").bind(uid.as_str()),
+        ResourceUid::Series(uid) => stmt.push(" AND se.series_uid = ").bind(uid.as_str()),
+        ResourceUid::Instance(uid) => stmt.push(" AND i.sop_uid = ").bind(uid.as_str()),
     };
     stmt.push(" ORDER BY se.id, i.id");
     let rows = tx.fetch(&stmt, LOCATION_KINDS).await?;
@@ -246,10 +257,11 @@ pub(crate) async fn append_event<T: Tx>(tx: &mut T, event: &Event) -> Result<u64
     body.seq = 0;
     let json = serde_json::to_string(&body).map_err(|e| Error::internal(e.to_string()))?;
     let mut s = Stmt::new(tx.dialect());
-    s.push("INSERT INTO events (id, kind, time, body) VALUES ")
+    s.push("INSERT INTO events (id, kind, partition, time, body) VALUES ")
         .bind_list([
             Cell::from(event.id.to_string()),
             Cell::from(event.kind.as_str()),
+            event.partition.as_ref().map(Partition::as_str).into(),
             Cell::from(micros(event.time)),
             Cell::from(json),
         ])
@@ -275,10 +287,14 @@ async fn apply_duplicate_policy<T: Tx>(
     record: &InstanceRecord,
     policy: DuplicatePolicy,
 ) -> Result<PolicyDecision> {
-    let existing = locate_rows(tx, &ResourceUid::Instance(record.instance.clone()))
-        .await?
-        .into_iter()
-        .next();
+    let existing = locate_rows(
+        tx,
+        &record.partition,
+        &ResourceUid::Instance(record.instance.clone()),
+    )
+    .await?
+    .into_iter()
+    .next();
     match (existing, policy) {
         (None, _) => Ok(PolicyDecision::Proceed(Duplicate::None)),
         (Some(_), DuplicatePolicy::Reject) => Err(Error::new(
@@ -309,11 +325,16 @@ async fn upsert_hierarchy<T: Tx>(
     let mut patient_cols = level_values(record, QueryLevel::Patient, extras);
     patient_cols.retain(|(n, _)| n != "patient_id" && n != "issuer");
     let mut s = Stmt::new(d);
-    let key = [("patient_id", patient_id.into()), ("issuer", issuer.into())];
+    let partition = record.partition.as_str();
+    let key = [
+        ("partition", partition.into()),
+        ("patient_id", patient_id.into()),
+        ("issuer", issuer.into()),
+    ];
     upsert(
         &mut s,
         "patients",
-        "patient_id, issuer",
+        "partition, patient_id, issuer",
         &key,
         &patient_cols,
         "id",
@@ -328,11 +349,19 @@ async fn upsert_hierarchy<T: Tx>(
     study_cols.push(("updated_at".into(), now.into()));
     let mut s = Stmt::new(d);
     let key = [
+        ("partition", partition.into()),
         ("study_uid", record.study.as_str().into()),
         ("patient_fk", patient_fk.into()),
         ("received_at", now.into()),
     ];
-    upsert(&mut s, "studies", "study_uid", &key, &study_cols, "id");
+    upsert(
+        &mut s,
+        "studies",
+        "partition, study_uid",
+        &key,
+        &study_cols,
+        "id",
+    );
     let study_fk = tx
         .fetch_one_int(&s)
         .await?
@@ -343,13 +372,14 @@ async fn upsert_hierarchy<T: Tx>(
     series_cols.push(("updated_at".into(), now.into()));
     let mut s = Stmt::new(d);
     let key = [
+        ("partition", partition.into()),
         ("series_uid", record.series.as_str().into()),
         ("study_fk", study_fk.into()),
     ];
     upsert(
         &mut s,
         "series",
-        "series_uid",
+        "partition, series_uid",
         &key,
         &series_cols,
         "id, study_fk",
@@ -380,6 +410,7 @@ async fn insert_instance<T: Tx>(
     let mut cols = level_values(record, QueryLevel::Instance, extras);
     cols.retain(|(n, _)| n != "sop_uid" && n != "sop_class");
     let mut fixed: Vec<(&str, Cell)> = vec![
+        ("partition", record.partition.as_str().into()),
         ("series_fk", series_fk.into()),
         ("sop_uid", record.instance.as_str().into()),
         ("sop_class", record.sop_class.as_str().into()),
@@ -435,10 +466,11 @@ pub(crate) async fn store_instance<T: Tx>(
 
 pub(crate) async fn delete<T: Tx>(
     tx: &mut T,
+    partition: &Partition,
     resource: &ResourceUid,
     event: &Event,
 ) -> Result<DeleteOutcome> {
-    let rows = locate_rows(tx, resource).await?;
+    let rows = locate_rows(tx, partition, resource).await?;
     if rows.is_empty() {
         return Err(Error::not_found(format!("{resource:?} does not exist")));
     }
@@ -455,6 +487,7 @@ pub(crate) async fn delete<T: Tx>(
 /// Rewrites the `extra` JSON of an instance and its parents (backfill).
 pub(crate) async fn update_extra<T: Tx>(
     tx: &mut T,
+    partition: &Partition,
     instance: &medicus_core::uid::SopInstanceUid,
     attributes: &DicomJsonObject,
     extras: &[ExtraTagStatus],
@@ -463,8 +496,10 @@ pub(crate) async fn update_extra<T: Tx>(
     let mut s = Stmt::new(d);
     s.push(
         "SELECT i.id, se.id, st.id, st.patient_fk FROM instances i JOIN series se ON se.id = i.series_fk \
-         JOIN studies st ON st.id = se.study_fk WHERE i.sop_uid = ",
+         JOIN studies st ON st.id = se.study_fk WHERE i.partition = ",
     )
+    .bind(partition.as_str())
+    .push(" AND i.sop_uid = ")
     .bind(instance.as_str());
     let kinds = [CellKind::Int, CellKind::Int, CellKind::Int, CellKind::Int];
     let row = tx
