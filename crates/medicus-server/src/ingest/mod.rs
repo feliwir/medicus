@@ -8,7 +8,7 @@
 //! 4. Record it in the index together with its `instance.stored` event, in one transaction.
 //!    Blobs left unreferenced by a failure or a replaced duplicate are deleted.
 
-mod parse;
+pub(crate) mod parse;
 #[cfg(test)]
 mod real_data;
 

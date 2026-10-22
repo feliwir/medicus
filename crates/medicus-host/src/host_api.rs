@@ -4,15 +4,18 @@ use std::ffi::c_void;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-use medicus_abi::bridge::{CompletionGuard, import_stream};
+use medicus_abi::bridge::{CompletionGuard, StreamCompletionGuard, export_stream, import_stream};
 use medicus_abi::ffi::{
     MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_SERVICE,
     MD_INVALID_ARGUMENT, MD_LOG_DEBUG, MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN, MD_OK,
     MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer, MdCancel, MdCompletion, MdHostApi, MdReadStream,
-    MdStatus, MdStr,
+    MdStatus, MdStr, MdStreamCompletion,
 };
 use medicus_core::capability::HostServices;
+use medicus_core::capability::index::ResourceUid;
 use medicus_core::event::Origin;
+use medicus_core::query::Query;
+use medicus_core::uid::SopInstanceUid;
 use medicus_core::{Error, ErrorKind};
 use tokio::runtime::Handle;
 
@@ -68,6 +71,8 @@ pub(crate) fn new_host_api(
         config: host_config,
         register_capability: host_register_capability,
         ingest: host_ingest,
+        call: host_call,
+        open_instance: host_open_instance,
     }));
     (ctx, api)
 }
@@ -184,5 +189,94 @@ unsafe extern "C" fn host_ingest(
                 .map_err(|e| Error::internal(e.to_string()))
         });
         guard.finish(result);
+    });
+}
+
+fn unavailable() -> Error {
+    Error::new(ErrorKind::Unavailable, "the archive is not ready yet")
+}
+
+fn parse<T: serde::de::DeserializeOwned>(what: &str, json: &[u8]) -> Result<T, Error> {
+    serde_json::from_slice(json)
+        .map_err(|e| Error::invalid_argument(format!("invalid {what}: {e}")))
+}
+
+fn to_buffer<T: serde::Serialize>(value: &T) -> Result<MdBuffer, Error> {
+    serde_json::to_vec(value)
+        .map(MdBuffer::from_vec)
+        .map_err(|e| Error::internal(e.to_string()))
+}
+
+/// A parsed `call` request.
+enum Call {
+    Query(Query),
+    Locate(ResourceUid),
+    Peers,
+}
+
+impl Call {
+    fn parse(method: &[u8], request: &[u8]) -> Result<Self, Error> {
+        match method {
+            b"query" => parse("query", request).map(Self::Query),
+            b"locate" => parse("resource", request).map(Self::Locate),
+            b"peers" => Ok(Self::Peers),
+            other => Err(Error::unsupported(format!(
+                "unknown host method {:?}",
+                String::from_utf8_lossy(other)
+            ))),
+        }
+    }
+
+    async fn run(self, services: &dyn HostServices) -> Result<MdBuffer, Error> {
+        match self {
+            Self::Query(q) => to_buffer(&services.query(&q).await?),
+            Self::Locate(r) => to_buffer(&services.locate(&r).await?),
+            Self::Peers => to_buffer(&services.peers().await?),
+        }
+    }
+}
+
+unsafe extern "C" fn host_call(
+    ctx: *mut c_void,
+    method: MdStr,
+    request: MdStr,
+    _cancel: MdCancel,
+    done: MdCompletion,
+) {
+    let guard = CompletionGuard::new(done);
+    // SAFETY: addons pass back the ctx we gave them; the strings are valid for this call.
+    let (ctx, method, request) = unsafe { (host_ctx(ctx), method.as_bytes(), request.as_bytes()) };
+    let call = match Call::parse(method, request) {
+        Ok(call) => call,
+        Err(e) => return guard.err(&e),
+    };
+    let Some(services) = ctx.services.get().cloned() else {
+        return guard.err(&unavailable());
+    };
+    ctx.rt
+        .spawn(async move { guard.finish(call.run(services.as_ref()).await) });
+}
+
+unsafe extern "C" fn host_open_instance(
+    ctx: *mut c_void,
+    instance: MdStr,
+    _cancel: MdCancel,
+    done: MdStreamCompletion,
+) {
+    let guard = StreamCompletionGuard::new(done);
+    // SAFETY: addons pass back the ctx we gave them; `instance` is valid for this call.
+    let (ctx, instance) = unsafe { (host_ctx(ctx), instance.to_str()) };
+    let Ok(Ok(instance)) = instance.map(SopInstanceUid::parse) else {
+        return guard.err(&Error::invalid_argument("invalid SOP Instance UID"));
+    };
+    let Some(services) = ctx.services.get().cloned() else {
+        return guard.err(&unavailable());
+    };
+    let rt = ctx.rt.clone();
+    ctx.rt.spawn(async move {
+        match services.open_instance(&instance).await {
+            Ok(stream) => guard.ok(export_stream(stream, &rt)),
+            Err(e) => guard.err(&e),
+        }
     });
 }

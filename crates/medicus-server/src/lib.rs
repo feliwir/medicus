@@ -11,6 +11,8 @@ mod dcmtk_tests;
 mod events;
 mod import;
 mod ingest;
+mod query;
+mod services;
 
 use std::future::Future;
 use std::path::Path;
@@ -38,7 +40,10 @@ impl Node {
         let caps = addons::load(&cfg, &tokio::runtime::Handle::current())?;
         let archive = Arc::new(Archive::new(&caps, &cfg.archive).await?);
         if let Some(loader) = &caps.loader {
-            loader.bind_services(archive.clone());
+            loader.bind_services(Arc::new(services::NodeServices::new(
+                archive.clone(),
+                cfg.peers.clone(),
+            )));
         }
         tracing::info!(?archive, "archive ready");
         Ok(Self { archive, caps, cfg })

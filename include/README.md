@@ -102,3 +102,18 @@ If you need isolation from untrusted logic, write a WASM addon instead (ADR-0002
 Structs and vtables starting with `size` may grow at the end in minor versions; never read a
 field beyond `size`, and always set `size = sizeof(...)` in structs you create. Changes are listed
 in [`CHANGELOG.md`](CHANGELOG.md).
+
+## 9. Host services
+
+Protocol addons reach the archive through `MdHostApi`, never through other addons:
+
+- `ingest` takes a read stream of a Part 10 file and an origin (JSON) and completes with the JSON
+  ingest outcome.
+- `call` takes a method name and a JSON request and completes with the JSON response:
+  `query` (a query AST, as in `medicus_core::query::Query` → `QueryResult`), `locate` (`{"level":
+  "study" | "series" | "instance", "uid": ...}` → stored instances) and `peers` (`null` → configured
+  peers).
+- `open_instance` takes a SOP Instance UID and completes with a read stream of the stored file.
+
+All of them fail with `MD_UNAVAILABLE` until the archive is ready; background services are only
+started after that.

@@ -118,6 +118,31 @@ pub(crate) fn parse_prefix(
     }
 }
 
+/// Parses a stored header (a range read of `0..header_length` of a Part 10 file).
+pub(crate) fn parse_header(data: &[u8]) -> Result<DefaultDicomObject> {
+    OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        .read_until(tags::PIXEL_DATA)
+        .from_reader(data)
+        .map_err(|e| Error::internal(format!("cannot parse stored header: {e}")))
+}
+
+/// The attributes `tags` of `ds` (those present) as DICOM JSON.
+pub(crate) fn to_json(
+    ds: &InMemDicomObject,
+    tags: impl IntoIterator<Item = Tag>,
+) -> Result<DicomJsonObject> {
+    let mut out = DicomJsonObject::new();
+    for tag in tags {
+        let Ok(element) = ds.element(tag) else {
+            continue;
+        };
+        let json = dicom_json::to_value(element).map_err(|e| invalid(format!("{tag}: {e}")))?;
+        out.insert(tag.json_key(), json);
+    }
+    Ok(out)
+}
+
 fn string(ds: &InMemDicomObject, tag: Tag) -> Option<String> {
     let s = ds.element(tag).ok()?.to_str().ok()?;
     let s = s.trim_end_matches(['\0', ' ']).trim_start();
@@ -155,18 +180,11 @@ fn extract(
         tracing::warn!(%instance, "Media Storage SOP Instance UID differs from SOP Instance UID");
     }
 
-    let mut attributes = DicomJsonObject::new();
     let wanted = medicus_core::tags::STANDARD
         .iter()
         .map(|a| a.tag)
         .chain(extra.iter().map(|e| e.tag));
-    for tag in wanted {
-        let Ok(element) = ds.element(tag) else {
-            continue;
-        };
-        let json = dicom_json::to_value(element).map_err(|e| invalid(format!("{tag}: {e}")))?;
-        attributes.insert(tag.json_key(), json);
-    }
+    let attributes = to_json(ds, wanted)?;
     Ok(ParsedHeader {
         study,
         series,

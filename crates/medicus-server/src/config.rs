@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
 use medicus_core::QueryLevel;
+use medicus_core::capability::Endpoint;
 use medicus_core::capability::index::{DuplicatePolicy, ExtraTag};
 use serde::{Deserialize, Serialize};
 
@@ -21,6 +22,8 @@ pub struct Config {
     pub log: LogConfig,
     pub archive: ArchiveConfig,
     pub addons: AddonsConfig,
+    /// Remote nodes by name, e.g. `[peers.pacs] protocol = "dimse", ae_title = "PACS", ...`.
+    pub peers: BTreeMap<String, Endpoint>,
 }
 
 /// How instances are stored and indexed.

@@ -182,14 +182,3 @@ impl Archive {
         }
     }
 }
-
-#[async_trait::async_trait]
-impl medicus_core::capability::HostServices for Archive {
-    async fn ingest(
-        &self,
-        data: medicus_core::capability::ByteStream,
-        origin: Origin,
-    ) -> Result<medicus_core::capability::Ingested> {
-        Archive::ingest(self, data, origin).await
-    }
-}

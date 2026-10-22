@@ -20,7 +20,7 @@ use core::ffi::c_void;
 /// Major ABI version. While it is 0, every minor change is breaking.
 pub const MD_ABI_MAJOR: u32 = 0;
 /// Minor ABI version.
-pub const MD_ABI_MINOR: u32 = 3;
+pub const MD_ABI_MINOR: u32 = 4;
 /// `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
 pub const MD_ABI_VERSION: u32 = (MD_ABI_MAJOR << 16) | MD_ABI_MINOR;
 
@@ -150,6 +150,26 @@ pub struct MdHostApi {
         origin: MdStr,
         cancel: MdCancel,
         done: MdCompletion,
+    ),
+    /// Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
+    /// Methods: `query` (a query AST → one page of results), `locate` (a study, series or
+    /// instance → its stored instances), `peers` (`null` → the configured peers). Unknown
+    /// methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
+    /// ready.
+    pub call: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        method: MdStr,
+        request: MdStr,
+        cancel: MdCancel,
+        done: MdCompletion,
+    ),
+    /// Opens the Part 10 file of the stored instance with SOP Instance UID `instance`
+    /// (ABI 0.4).
+    pub open_instance: unsafe extern "C" fn(
+        ctx: *mut c_void,
+        instance: MdStr,
+        cancel: MdCancel,
+        done: MdStreamCompletion,
     ),
 }
 

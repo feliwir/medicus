@@ -19,7 +19,7 @@
 /**
  * Minor ABI version.
  */
-#define MD_ABI_MINOR 3
+#define MD_ABI_MINOR 4
 
 /**
  * `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
@@ -158,6 +158,26 @@ typedef struct MdHostApi {
                  struct MdStr origin,
                  struct MdCancel cancel,
                  struct MdCompletion done);
+  /**
+   * Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
+   * Methods: `query` (a query AST → one page of results), `locate` (a study, series or
+   * instance → its stored instances), `peers` (`null` → the configured peers). Unknown
+   * methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
+   * ready.
+   */
+  void (*call)(void *ctx,
+               struct MdStr method,
+               struct MdStr request,
+               struct MdCancel cancel,
+               struct MdCompletion done);
+  /**
+   * Opens the Part 10 file of the stored instance with SOP Instance UID `instance`
+   * (ABI 0.4).
+   */
+  void (*open_instance)(void *ctx,
+                        struct MdStr instance,
+                        struct MdCancel cancel,
+                        struct MdStreamCompletion done);
 } MdHostApi;
 
 /**

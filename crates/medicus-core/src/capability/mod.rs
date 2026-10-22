@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 pub mod host;
 pub mod index;
 
-pub use host::{HostServices, Ingested, Service};
+pub use host::{Endpoint, HostServices, Ingested, Peer, Service};
 pub use index::IndexStore;
 
 use crate::BlobKey;
