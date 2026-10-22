@@ -36,17 +36,17 @@ const FIRST_ATTEMPT: usize = 16 * 1024;
 
 /// The result of ingesting one instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub(crate) struct Stored {
-    pub(crate) study: StudyInstanceUid,
-    pub(crate) series: SeriesInstanceUid,
-    pub(crate) instance: SopInstanceUid,
-    pub(crate) sop_class: SopClassUid,
-    pub(crate) transfer_syntax: TransferSyntaxUid,
-    pub(crate) size: u64,
+pub struct Stored {
+    pub study: StudyInstanceUid,
+    pub series: SeriesInstanceUid,
+    pub instance: SopInstanceUid,
+    pub sop_class: SopClassUid,
+    pub transfer_syntax: TransferSyntaxUid,
+    pub size: u64,
     /// Sequence number of the `instance.stored` event; `None` if an existing instance was kept.
-    pub(crate) seq: Option<u64>,
+    pub seq: Option<u64>,
     #[serde(flatten)]
-    pub(crate) duplicate: Duplicate,
+    pub duplicate: Duplicate,
 }
 
 impl Archive {
@@ -88,7 +88,7 @@ impl Archive {
     }
 
     /// Ingests one DICOM Part 10 file.
-    pub(crate) async fn ingest(&self, mut data: ByteStream, origin: Origin) -> Result<Stored> {
+    pub async fn ingest(&self, mut data: ByteStream, origin: Origin) -> Result<Stored> {
         self.ensure_capacity()?;
         let (prefix, parsed) = self.read_header(&mut data).await?;
 

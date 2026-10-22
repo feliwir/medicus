@@ -1,13 +1,4 @@
-//! `medicus` — the core server binary.
-
-mod addons;
-mod api;
-mod archive;
-mod capacity;
-mod config;
-mod events;
-mod import;
-mod ingest;
+//! `medicus`: the core server binary (CLI over the `medicus_server` library).
 
 use std::path::PathBuf;
 
@@ -15,7 +6,7 @@ use anyhow::Context as _;
 use clap::{Parser, Subcommand};
 use tracing_subscriber::EnvFilter;
 
-use crate::config::{Config, LogFormat};
+use medicus_server::{Config, LogConfig, LogFormat, Node};
 
 #[derive(Debug, Parser)]
 #[command(version, about = "medicus — a lightweight, modular PACS")]
@@ -43,7 +34,7 @@ enum Command {
     },
 }
 
-fn init_tracing(cfg: &config::LogConfig) {
+fn init_tracing(cfg: &LogConfig) {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new(&cfg.filter));
     let builder = tracing_subscriber::fmt().with_env_filter(filter);
     match cfg.format {
@@ -79,13 +70,6 @@ async fn shutdown_signal() {
     }
 }
 
-/// Loads the addons and wires the archive.
-async fn start(cfg: &Config) -> anyhow::Result<(addons::Capabilities, archive::Archive)> {
-    let caps = addons::load(cfg, &tokio::runtime::Handle::current())?;
-    let archive = archive::Archive::new(&caps, &cfg.archive).await?;
-    Ok((caps, archive))
-}
-
 async fn run(cfg: Config) -> anyhow::Result<()> {
     tracing::info!(
         name = %cfg.server.name,
@@ -94,38 +78,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
         version = env!("CARGO_PKG_VERSION"),
         "medicus starting"
     );
-    let (caps, archive) = start(&cfg).await?;
-    let archive = std::sync::Arc::new(archive);
-    tracing::info!(?archive, "archive ready");
-
-    let shutdown = tokio_util::sync::CancellationToken::new();
-    let mut deliveries = events::spawn(&archive, caps.event_hooks.clone(), &shutdown);
-    let capacity = tokio::spawn(capacity::monitor(archive.clone(), shutdown.clone()));
-
-    let state = api::AppState {
-        archive,
-        name: cfg.server.name.clone(),
-        addons: caps.addons.clone().into(),
-    };
-    let listener = tokio::net::TcpListener::bind(cfg.http.listen)
-        .await
-        .with_context(|| format!("binding {}", cfg.http.listen))?;
-    tracing::info!(addr = %cfg.http.listen, "HTTP API listening");
-    let app = api::router(state).into_make_service_with_connect_info::<std::net::SocketAddr>();
-    let token = shutdown.clone();
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            shutdown_signal().await;
-            token.cancel();
-        })
-        .await
-        .context("HTTP server")?;
-
-    tracing::info!("shutting down");
-    shutdown.cancel();
-    while deliveries.join_next().await.is_some() {}
-    let _ = capacity.await;
-    Ok(())
+    Node::open(cfg).await?.serve(shutdown_signal()).await
 }
 
 fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
@@ -153,10 +106,8 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Import { path, concurrency } => {
             init_tracing(&cfg.log);
-            let report = runtime()?.block_on(async {
-                let (_caps, archive) = start(&cfg).await?;
-                import::import(&archive, &path, concurrency).await
-            })?;
+            let report = runtime()?
+                .block_on(async { Node::open(cfg).await?.import(&path, concurrency).await })?;
             let out = serde_json::to_string_pretty(&report)?;
             #[allow(clippy::print_stdout)] // the command's output
             {

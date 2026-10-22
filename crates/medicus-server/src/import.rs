@@ -18,16 +18,16 @@ use dicom_dictionary_std::uids;
 const READ_CHUNK: usize = 256 * 1024;
 
 #[derive(Debug, Default, Serialize)]
-pub(crate) struct ImportReport {
-    pub(crate) files: u64,
-    pub(crate) stored: u64,
-    pub(crate) replaced: u64,
-    pub(crate) kept_existing: u64,
+pub struct ImportReport {
+    pub files: u64,
+    pub stored: u64,
+    pub replaced: u64,
+    pub kept_existing: u64,
     /// Files not imported, by reason (not Part 10, DICOMDIR, ...).
-    pub(crate) skipped: BTreeMap<String, u64>,
+    pub skipped: BTreeMap<String, u64>,
     /// Failures by error kind.
-    pub(crate) failed: BTreeMap<String, u64>,
-    pub(crate) bytes: u64,
+    pub failed: BTreeMap<String, u64>,
+    pub bytes: u64,
 }
 
 fn files_below(root: &Path) -> std::io::Result<Vec<PathBuf>> {

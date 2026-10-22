@@ -17,7 +17,7 @@ use tokio::sync::watch;
 use crate::addons::Capabilities;
 use crate::config::{ArchiveConfig, CapacityConfig};
 
-pub(crate) struct Archive {
+pub struct Archive {
     pub(crate) index: Arc<dyn IndexStore>,
     stores: BTreeMap<String, Arc<dyn BlobStore>>,
     pub(crate) default_store: String,

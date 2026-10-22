@@ -15,29 +15,29 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct Config {
-    pub(crate) server: ServerConfig,
-    pub(crate) http: HttpConfig,
-    pub(crate) log: LogConfig,
-    pub(crate) archive: ArchiveConfig,
-    pub(crate) addons: AddonsConfig,
+pub struct Config {
+    pub server: ServerConfig,
+    pub http: HttpConfig,
+    pub log: LogConfig,
+    pub archive: ArchiveConfig,
+    pub addons: AddonsConfig,
 }
 
 /// How instances are stored and indexed.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct ArchiveConfig {
+pub struct ArchiveConfig {
     /// Registered name of the index to use.
-    pub(crate) index: String,
+    pub index: String,
     /// Registered name of the blob store new instances are written to.
-    pub(crate) storage: String,
-    pub(crate) duplicate_policy: DuplicatePolicy,
+    pub storage: String,
+    pub duplicate_policy: DuplicatePolicy,
     /// Largest accepted header (everything before Pixel Data), in bytes.
-    pub(crate) max_header_bytes: usize,
+    pub max_header_bytes: usize,
     /// Attributes indexed in addition to the standard query keys.
-    pub(crate) extra_tags: Vec<ExtraTagConfig>,
+    pub extra_tags: Vec<ExtraTagConfig>,
     /// When ingest is refused because storage is (nearly) full.
-    pub(crate) capacity: CapacityConfig,
+    pub capacity: CapacityConfig,
 }
 
 /// The critical-capacity guard (PLAN §3.10). It works without any eviction policy: when the
@@ -45,14 +45,14 @@ pub(crate) struct ArchiveConfig {
 /// `resume_percent`. Retrieval is never affected.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct CapacityConfig {
-    pub(crate) critical_percent: f64,
-    pub(crate) resume_percent: f64,
+pub struct CapacityConfig {
+    pub critical_percent: f64,
+    pub resume_percent: f64,
     /// Optional quota for the default store; usage is then also measured against it, using the
     /// bytes referenced by the index. Required for stores without a physical limit (S3).
-    pub(crate) quota_bytes: Option<u64>,
+    pub quota_bytes: Option<u64>,
     /// Seconds between two capacity checks.
-    pub(crate) check_interval_secs: u64,
+    pub check_interval_secs: u64,
 }
 
 impl Default for CapacityConfig {
@@ -81,12 +81,12 @@ impl Default for ArchiveConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct ExtraTagConfig {
+pub struct ExtraTagConfig {
     /// Dictionary keyword (`SliceThickness`) or tag (`00180050`, `(0018,0050)`).
-    pub(crate) tag: String,
+    pub tag: String,
     /// The level the attribute belongs to.
     #[serde(default = "default_extra_level")]
-    pub(crate) level: QueryLevel,
+    pub level: QueryLevel,
 }
 
 fn default_extra_level() -> QueryLevel {
@@ -95,7 +95,7 @@ fn default_extra_level() -> QueryLevel {
 
 impl ExtraTagConfig {
     /// Resolves keyword or tag and the VR through the standard dictionary.
-    pub(crate) fn resolve(&self) -> Result<ExtraTag, String> {
+    pub fn resolve(&self) -> Result<ExtraTag, String> {
         use dicom_core::dictionary::{DataDictionary as _, DataDictionaryEntry as _, TagRange};
         use dicom_dictionary_std::StandardDataDictionary;
         let entry = match medicus_core::tag::parse_tag(&self.tag) {
@@ -119,11 +119,11 @@ impl ExtraTagConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct ServerConfig {
+pub struct ServerConfig {
     /// Human-readable name of this node, reported by `/api/v1/system`.
-    pub(crate) name: String,
+    pub name: String,
     /// Directory for local state (spill files, `SQLite` index by default, ...).
-    pub(crate) data_dir: PathBuf,
+    pub data_dir: PathBuf,
 }
 
 impl Default for ServerConfig {
@@ -137,8 +137,8 @@ impl Default for ServerConfig {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct HttpConfig {
-    pub(crate) listen: SocketAddr,
+pub struct HttpConfig {
+    pub listen: SocketAddr,
 }
 
 impl Default for HttpConfig {
@@ -151,7 +151,7 @@ impl Default for HttpConfig {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub(crate) enum LogFormat {
+pub enum LogFormat {
     #[default]
     Pretty,
     Json,
@@ -159,10 +159,10 @@ pub(crate) enum LogFormat {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
-pub(crate) struct LogConfig {
+pub struct LogConfig {
     /// A `tracing` filter directive, e.g. `info,medicus=debug`. `RUST_LOG` takes precedence.
-    pub(crate) filter: String,
-    pub(crate) format: LogFormat,
+    pub filter: String,
+    pub format: LogFormat,
 }
 
 impl Default for LogConfig {
@@ -178,28 +178,28 @@ impl Default for LogConfig {
 // becomes an addon entry, and `AddonEntry` itself rejects unknown fields.
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
-pub(crate) struct AddonsConfig {
+pub struct AddonsConfig {
     /// Directories searched for addon manifests (`<name>.addon.toml`).
-    pub(crate) search_paths: Vec<PathBuf>,
+    pub search_paths: Vec<PathBuf>,
     /// Per-addon settings, keyed by addon name.
     #[serde(flatten)]
-    pub(crate) entries: BTreeMap<String, AddonEntry>,
+    pub entries: BTreeMap<String, AddonEntry>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct AddonEntry {
+pub struct AddonEntry {
     #[serde(default = "default_true")]
-    pub(crate) enabled: bool,
+    pub enabled: bool,
     /// Shared library to load. Without it, the addon must be built into the server.
     #[serde(default)]
-    pub(crate) library: Option<PathBuf>,
+    pub library: Option<PathBuf>,
     /// Optional SHA-256 (hex) the addon library must match before it is loaded.
     #[serde(default)]
-    pub(crate) sha256: Option<String>,
+    pub sha256: Option<String>,
     /// Addon-specific configuration, passed to the addon as JSON.
     #[serde(default)]
-    pub(crate) config: serde_json::Value,
+    pub config: serde_json::Value,
 }
 
 fn default_true() -> bool {
@@ -207,7 +207,7 @@ fn default_true() -> bool {
 }
 
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum ConfigError {
+pub enum ConfigError {
     #[error("configuration file {0} does not exist")]
     Missing(PathBuf),
     #[error(transparent)]
@@ -216,7 +216,7 @@ pub(crate) enum ConfigError {
 
 impl Config {
     /// Loads defaults, then `file` (if given), then `MEDICUS_*` environment variables.
-    pub(crate) fn load(file: Option<&Path>) -> Result<Self, ConfigError> {
+    pub fn load(file: Option<&Path>) -> Result<Self, ConfigError> {
         Self::figment(file)?
             .extract()
             .map_err(|e| ConfigError::Invalid(Box::new(e)))
