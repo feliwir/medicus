@@ -1,4 +1,5 @@
-//! `dimse`: a DICOM Storage SCP (C-ECHO, C-STORE) that ingests into the archive.
+//! `dimse`: the archive's DICOM network services: C-ECHO, C-STORE (ingest) and C-FIND
+//! (Patient Root and Study Root query).
 //!
 //! ```toml
 //! [addons.dimse]
@@ -6,7 +7,10 @@
 //! ```
 //!
 //! Received instances go through the host's ingest, exactly like uploads over HTTP, so they are
-//! indexed, deduplicated and announced as `instance.stored` events with a DIMSE origin.
+//! indexed, deduplicated and announced as `instance.stored` events with a DIMSE origin. Queries go
+//! through the host's query service, so they see the same data as every other front-end.
+
+mod find;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -17,7 +21,9 @@ use medicus_addon_sdk::{Host, Registrar, async_trait, runtime, static_addon};
 use medicus_core::capability::{ByteStream, HostServices as _, Service};
 use medicus_core::event::Origin;
 use medicus_core::{AeTitle, Error, ErrorKind, Result};
-use medicus_dimse::{AssociationInfo, Scp, ScpOptions, Status, StoreHandler, StoreRequest};
+use medicus_dimse::{
+    AssociationInfo, FindRequest, Handler, Matches, Scp, ScpOptions, Status, StoreRequest,
+};
 use serde::Deserialize;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
@@ -91,6 +97,10 @@ impl Config {
         options
             .transfer_syntaxes
             .clone_from(&self.transfer_syntaxes);
+        options.find_sop_classes = find::FIND_SOP_CLASSES
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect();
         options.max_pdu_length = self.max_pdu_length;
         options.idle_timeout =
             (self.idle_timeout_secs > 0).then(|| Duration::from_secs(self.idle_timeout_secs));
@@ -122,7 +132,7 @@ impl Ingest {
 }
 
 #[async_trait]
-impl StoreHandler for Ingest {
+impl Handler for Ingest {
     async fn store(
         &self,
         association: Arc<AssociationInfo>,
@@ -151,6 +161,17 @@ impl StoreHandler for Ingest {
                 Status::from(&e)
             }
         }
+    }
+
+    async fn find(
+        &self,
+        association: Arc<AssociationInfo>,
+        request: FindRequest,
+        identifier: dicom_object::InMemDicomObject,
+    ) -> Result<Matches, Status> {
+        let find = find::Find::parse(&request.sop_class, &identifier)?;
+        tracing::debug!(association = %association.id, level = %find.query.level, keys = find.query.keys.len(), "C-FIND");
+        Ok(find.run(self.host, self.ae_title.as_str().to_owned()))
     }
 }
 

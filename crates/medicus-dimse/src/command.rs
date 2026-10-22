@@ -47,6 +47,10 @@ pub struct Status {
 
 impl Status {
     pub const SUCCESS: u16 = 0x0000;
+    /// Pending: a match (C-FIND) or sub-operations (C-MOVE, C-GET) follow.
+    pub const PENDING: u16 = 0xFF00;
+    /// Cancelled by a C-CANCEL.
+    pub const CANCEL: u16 = 0xFE00;
     /// Refused: SOP Class not supported.
     pub const SOP_CLASS_NOT_SUPPORTED: u16 = 0x0122;
     /// Refused: not authorized.
@@ -57,7 +61,9 @@ impl Status {
     pub const OUT_OF_RESOURCES: u16 = 0xA700;
     /// C-STORE: Error: Data Set does not match SOP Class (A9xx).
     pub const DATA_SET_MISMATCH: u16 = 0xA900;
-    /// C-STORE: Error: Cannot understand (Cxxx).
+    /// C-FIND/C-MOVE/C-GET: Identifier does not match SOP Class (A900).
+    pub const IDENTIFIER_MISMATCH: u16 = 0xA900;
+    /// C-STORE: Error: Cannot understand (Cxxx); C-FIND etc.: Unable to process.
     pub const CANNOT_UNDERSTAND: u16 = 0xC000;
 
     /// Maximum length of an Error Comment (LO).
@@ -203,6 +209,19 @@ impl Command {
             us(tags::COMMAND_DATA_SET_TYPE, 0x0000),
             uid(tags::AFFECTED_SOP_INSTANCE_UID, sop_instance),
         ]))
+    }
+
+    /// A response to `request` followed by a data set (e.g. a C-FIND match).
+    pub fn pending_response_to(request: &Self, status: &Status) -> Self {
+        let mut response = Self::response_to(request, status);
+        response.0.put(us(tags::COMMAND_DATA_SET_TYPE, 0x0000));
+        // Group length must be recomputed after the change.
+        Self(InMemDicomObject::command_from_element_iter(
+            response
+                .0
+                .into_iter()
+                .filter(|e| e.header().tag != tags::COMMAND_GROUP_LENGTH),
+        ))
     }
 
     /// The response to `request`, without a data set.

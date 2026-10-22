@@ -11,9 +11,7 @@ use dicom_ul::association::{AsyncClientAssociation, ClientAssociationOptions};
 use dicom_ul::pdu::{PDataValue, PDataValueType};
 use futures::TryStreamExt as _;
 use medicus_core::capability::ByteStream;
-use medicus_dimse::{
-    AssociationInfo, Command, Scp, ScpOptions, Status, StoreHandler, StoreRequest,
-};
+use medicus_dimse::{AssociationInfo, Command, Handler, Scp, ScpOptions, Status, StoreRequest};
 use medicus_testkit::dicom::InstanceBuilder;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::sync::CancellationToken;
@@ -25,7 +23,7 @@ struct Collect {
 }
 
 #[async_trait::async_trait]
-impl StoreHandler for Collect {
+impl Handler for Collect {
     async fn store(
         &self,
         association: Arc<AssociationInfo>,
@@ -57,7 +55,7 @@ async fn start(options: ScpOptions, status: u16) -> (SocketAddr, Arc<Collect>, C
 struct Shared(Arc<Collect>);
 
 #[async_trait::async_trait]
-impl StoreHandler for Shared {
+impl Handler for Shared {
     async fn store(
         &self,
         association: Arc<AssociationInfo>,

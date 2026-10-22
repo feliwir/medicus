@@ -1,9 +1,12 @@
-//! The DIMSE service provider: accepts associations and serves C-ECHO and C-STORE.
+//! The DIMSE service provider: accepts associations and serves C-ECHO, C-STORE and C-FIND.
 //!
 //! A C-STORE data set is never buffered as a whole: its P-DATA fragments are forwarded through a
-//! bounded channel to the [`StoreHandler`] as they arrive, behind a generated Part 10 preamble
+//! bounded channel to the [`Handler`] as they arrive, behind a generated Part 10 preamble
 //! and File Meta Information. When the handler falls behind, the channel fills up and the
 //! association stops reading from the socket, so TCP flow control slows the sender down.
+//!
+//! C-FIND matches are streamed as pending responses while the association keeps listening, so a
+//! C-CANCEL stops the query.
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -12,7 +15,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use dicom_dictionary_std::uids;
-use dicom_object::FileMetaTableBuilder;
+use dicom_encoding::TransferSyntaxIndex as _;
+use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use dicom_ul::Pdu;
 use dicom_ul::association::server::{AccessControl, DefaultNegotiation};
@@ -22,6 +26,7 @@ use dicom_ul::pdu::{
     UserIdentity,
 };
 use futures::StreamExt as _;
+use futures::stream::BoxStream;
 use medicus_core::capability::ByteStream;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Semaphore, mpsc};
@@ -35,6 +40,8 @@ use crate::{Error, IMPLEMENTATION_CLASS_UID, IMPLEMENTATION_VERSION_NAME};
 
 /// P-DATA fragments buffered between the association and the store handler.
 const STORE_CHANNEL_CAPACITY: usize = 16;
+/// Largest accepted C-FIND identifier.
+const MAX_IDENTIFIER: usize = 1024 * 1024;
 /// How long running associations may continue after shutdown was requested.
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
@@ -49,6 +56,8 @@ pub struct ScpOptions {
     pub allowed_calling: Option<HashSet<String>>,
     /// Abstract syntaxes accepted for C-STORE (Verification is always accepted).
     pub storage_sop_classes: Vec<String>,
+    /// Query/Retrieve information models accepted for C-FIND (e.g. Study Root FIND).
+    pub find_sop_classes: Vec<String>,
     /// Accepted transfer syntaxes. Empty (the default) accepts any transfer syntax known to
     /// dicom-rs whose data sets it can read, compressed pixel data included; unknown syntaxes
     /// cannot be accepted, as the archive must parse the header.
@@ -68,6 +77,7 @@ impl ScpOptions {
             require_called_ae: false,
             allowed_calling: None,
             storage_sop_classes: crate::storage::all().map(str::to_owned).collect(),
+            find_sop_classes: Vec::new(),
             transfer_syntaxes: Vec::new(),
             max_pdu_length: 64 * 1024,
             idle_timeout: Some(Duration::from_mins(5)),
@@ -112,9 +122,22 @@ pub struct StoreRequest {
     pub move_originator: Option<(String, u16)>,
 }
 
-/// Receives the data sets of C-STORE requests.
+/// A C-FIND request.
+#[derive(Debug, Clone)]
+pub struct FindRequest {
+    pub message_id: u16,
+    /// The Query/Retrieve information model (Affected SOP Class UID).
+    pub sop_class: String,
+}
+
+/// The matches of a C-FIND, each an identifier to return; an `Err` ends the query with that
+/// failure status.
+pub type Matches = BoxStream<'static, Result<InMemDicomObject, Status>>;
+
+/// The services behind the SCP. Operations a handler does not support keep their default, which
+/// refuses them; their SOP classes should not be configured either.
 #[async_trait::async_trait]
-pub trait StoreHandler: Send + Sync + 'static {
+pub trait Handler: Send + Sync + 'static {
     /// Stores one instance. `data` is a complete DICOM Part 10 file: a generated preamble and
     /// File Meta Information followed by the data set exactly as received. The stream yields an
     /// error if the association breaks off before the data set is complete.
@@ -123,7 +146,21 @@ pub trait StoreHandler: Send + Sync + 'static {
         association: Arc<AssociationInfo>,
         request: StoreRequest,
         data: ByteStream,
-    ) -> Status;
+    ) -> Status {
+        let _ = (association, request, data);
+        Status::new(Status::SOP_CLASS_NOT_SUPPORTED)
+    }
+
+    /// Starts a query for `identifier`.
+    async fn find(
+        &self,
+        association: Arc<AssociationInfo>,
+        request: FindRequest,
+        identifier: InMemDicomObject,
+    ) -> Result<Matches, Status> {
+        let _ = (association, request, identifier);
+        Err(Status::new(Status::SOP_CLASS_NOT_SUPPORTED))
+    }
 }
 
 /// A DIMSE service provider.
@@ -134,7 +171,7 @@ pub struct Scp<H> {
     handler: Arc<H>,
 }
 
-impl<H: StoreHandler> Scp<H> {
+impl<H: Handler> Scp<H> {
     pub fn new(config: ScpOptions, handler: H) -> Self {
         let access = Access {
             ae_title: config.ae_title.clone(),
@@ -149,7 +186,11 @@ impl<H: StoreHandler> Scp<H> {
         if let Some(timeout) = config.idle_timeout {
             options = options.read_timeout(timeout).write_timeout(timeout);
         }
-        for class in &config.storage_sop_classes {
+        for class in config
+            .storage_sop_classes
+            .iter()
+            .chain(&config.find_sop_classes)
+        {
             options = options.with_abstract_syntax(class.clone());
         }
         for ts in config.accepted_transfer_syntaxes() {
@@ -235,7 +276,7 @@ impl AccessControl for Access {
     }
 }
 
-async fn serve_connection<H: StoreHandler>(
+async fn serve_connection<H: Handler>(
     options: &ServerAssociationOptions<'static, Access, DefaultNegotiation>,
     handler: Arc<H>,
     socket: TcpStream,
@@ -268,6 +309,7 @@ async fn serve_connection<H: StoreHandler>(
         handler,
         command: Vec::new(),
         pending: None,
+        closed: false,
     };
     let result = tokio::select! {
         result = session.run() => result,
@@ -291,8 +333,19 @@ enum Sink {
         tx: Option<mpsc::Sender<medicus_core::Result<Bytes>>>,
         task: JoinHandle<Status>,
     },
+    /// Into a buffer: a C-FIND identifier, encoded in the context's transfer syntax.
+    Find {
+        identifier: Vec<u8>,
+        transfer_syntax: String,
+    },
     /// Nowhere: the request is answered with this status once its data set is complete.
     Discard(Status),
+}
+
+/// What happened first while a C-FIND was running.
+enum FindEvent {
+    Match(Option<Result<InMemDicomObject, Status>>),
+    Pdu(Result<Pdu, dicom_ul::association::Error>),
 }
 
 /// A request whose data set is still arriving.
@@ -309,15 +362,20 @@ struct Session<H> {
     /// Command fragments received so far.
     command: Vec<u8>,
     pending: Option<Pending>,
+    /// The peer aborted the association.
+    closed: bool,
 }
 
-impl<H: StoreHandler> Session<H> {
+impl<H: Handler> Session<H> {
     async fn run(&mut self) -> Result<(), Error> {
         loop {
             match self.association.receive().await? {
                 Pdu::PData { data } => {
                     for pdv in data {
                         self.on_pdv(pdv).await?;
+                        if self.closed {
+                            return Ok(());
+                        }
                     }
                 }
                 Pdu::ReleaseRQ => {
@@ -369,33 +427,170 @@ impl<H: StoreHandler> Session<H> {
                         "data set on a different presentation context than its command".into(),
                     ));
                 }
-                if let Sink::Store { tx, .. } = &mut pending.sink
-                    && let Some(sender) = tx
-                    && sender.send(Ok(Bytes::from(pdv.data))).await.is_err()
-                {
-                    // The handler stopped reading (it failed); drain the rest.
-                    *tx = None;
+                match &mut pending.sink {
+                    Sink::Store { tx, .. } => {
+                        if let Some(sender) = tx
+                            && sender.send(Ok(Bytes::from(pdv.data))).await.is_err()
+                        {
+                            // The handler stopped reading (it failed); drain the rest.
+                            *tx = None;
+                        }
+                    }
+                    Sink::Find { identifier, .. } => {
+                        if identifier.len() + pdv.data.len() > MAX_IDENTIFIER {
+                            return Err(Error::Protocol("C-FIND identifier too large".into()));
+                        }
+                        identifier.extend_from_slice(&pdv.data);
+                    }
+                    Sink::Discard(_) => {}
                 }
                 if pdv.is_last {
                     let Some(pending) = self.pending.take() else {
                         unreachable!("checked above");
                     };
-                    let status = match pending.sink {
-                        Sink::Store { tx, task } => {
-                            drop(tx);
-                            task.await.unwrap_or_else(|e| {
-                                tracing::error!(association = %self.info.id, error = %e, "store handler failed");
-                                Status::new(Status::CANNOT_UNDERSTAND)
-                            })
-                        }
-                        Sink::Discard(status) => status,
-                    };
-                    self.respond(&pending.command, pending.context_id, &status)
-                        .await?;
+                    self.complete(pending).await?;
                 }
             }
         }
         Ok(())
+    }
+
+    /// Handles a request whose data set has arrived completely.
+    async fn complete(&mut self, pending: Pending) -> Result<(), Error> {
+        let Pending {
+            command,
+            context_id,
+            sink,
+        } = pending;
+        let status = match sink {
+            Sink::Store { tx, task } => {
+                drop(tx);
+                task.await.unwrap_or_else(|e| {
+                    tracing::error!(association = %self.info.id, error = %e, "store handler failed");
+                    Status::new(Status::CANNOT_UNDERSTAND)
+                })
+            }
+            Sink::Find {
+                identifier,
+                transfer_syntax,
+            } => {
+                return self
+                    .find(&command, context_id, &identifier, &transfer_syntax)
+                    .await;
+            }
+            Sink::Discard(status) => status,
+        };
+        self.respond(&command, context_id, &status).await
+    }
+
+    /// Runs a C-FIND: sends each match as a pending response until the matches end, fail, or the
+    /// peer cancels.
+    async fn find(
+        &mut self,
+        command: &Command,
+        context_id: u8,
+        identifier: &[u8],
+        transfer_syntax: &str,
+    ) -> Result<(), Error> {
+        let Some(ts) = TransferSyntaxRegistry.get(transfer_syntax) else {
+            return Err(Error::Protocol(format!(
+                "unknown transfer syntax {transfer_syntax}"
+            )));
+        };
+        let identifier = match InMemDicomObject::read_dataset_with_ts(identifier, ts) {
+            Ok(identifier) => identifier,
+            Err(e) => {
+                let status = Status::new(Status::IDENTIFIER_MISMATCH)
+                    .with_comment(format!("cannot decode identifier: {e}"));
+                return self.respond(command, context_id, &status).await;
+            }
+        };
+        let (Some(message_id), Some(sop_class)) =
+            (command.message_id(), command.affected_sop_class())
+        else {
+            let status = Status::new(Status::CANNOT_UNDERSTAND)
+                .with_comment("C-FIND-RQ lacks required command elements");
+            return self.respond(command, context_id, &status).await;
+        };
+        let request = FindRequest {
+            message_id,
+            sop_class,
+        };
+        let mut matches = match self
+            .handler
+            .find(self.info.clone(), request, identifier)
+            .await
+        {
+            Ok(matches) => matches,
+            Err(status) => return self.respond(command, context_id, &status).await,
+        };
+        loop {
+            let event = tokio::select! {
+                next = matches.next() => FindEvent::Match(next),
+                pdu = self.association.receive() => FindEvent::Pdu(pdu),
+            };
+            match event {
+                FindEvent::Match(Some(Ok(found))) => {
+                    let data = encode_data_set(&found, ts)?;
+                    let status = Status::new(Status::PENDING);
+                    self.send_message(
+                        context_id,
+                        &Command::pending_response_to(command, &status),
+                        Some(&data),
+                    )
+                    .await?;
+                }
+                FindEvent::Match(Some(Err(status))) => {
+                    return self.respond(command, context_id, &status).await;
+                }
+                FindEvent::Match(None) => {
+                    return self.respond(command, context_id, &Status::success()).await;
+                }
+                FindEvent::Pdu(pdu) => match pdu? {
+                    Pdu::PData { data } => {
+                        if self.is_cancel(data, message_id)? {
+                            let status = Status::new(Status::CANCEL);
+                            return self.respond(command, context_id, &status).await;
+                        }
+                    }
+                    Pdu::AbortRQ { source } => {
+                        tracing::info!(association = %self.info.id, ?source, "association aborted by peer");
+                        self.closed = true;
+                        return Ok(());
+                    }
+                    other => {
+                        return Err(Error::Protocol(format!(
+                            "unexpected PDU during C-FIND: {}",
+                            other.short_description()
+                        )));
+                    }
+                },
+            }
+        }
+    }
+
+    /// Collects command fragments received while an operation runs; `true` once they form a
+    /// C-CANCEL-RQ for `message_id`. Anything else is a protocol error, as the SCP does not
+    /// negotiate asynchronous operations.
+    fn is_cancel(&mut self, data: Vec<PDataValue>, message_id: u16) -> Result<bool, Error> {
+        for pdv in data {
+            if pdv.value_type != PDataValueType::Command {
+                return Err(Error::Protocol(
+                    "data set during a running operation".into(),
+                ));
+            }
+            self.command.extend_from_slice(&pdv.data);
+            if pdv.is_last {
+                let command = Command::decode(&std::mem::take(&mut self.command))?;
+                if command.field() == Some(CommandField::C_CANCEL_RQ)
+                    && command.message_id_being_responded_to() == Some(message_id)
+                {
+                    return Ok(true);
+                }
+                return Err(Error::Protocol("request during a running operation".into()));
+            }
+        }
+        Ok(false)
     }
 
     async fn on_command(&mut self, command: Command, context_id: u8) -> Result<(), Error> {
@@ -419,6 +614,12 @@ impl<H: StoreHandler> Session<H> {
 
         if field == CommandField::C_STORE_RQ {
             let sink = self.store_sink(&command, &abstract_syntax, transfer_syntax);
+            self.expect_data_set(command, context_id, sink).await
+        } else if field == CommandField::C_FIND_RQ {
+            let sink = Sink::Find {
+                identifier: Vec::new(),
+                transfer_syntax,
+            };
             self.expect_data_set(command, context_id, sink).await
         } else if field == CommandField::C_ECHO_RQ {
             self.respond(&command, context_id, &Status::success()).await
@@ -454,6 +655,8 @@ impl<H: StoreHandler> Session<H> {
                 task.abort();
                 Status::new(Status::CANNOT_UNDERSTAND).with_comment("C-STORE without a data set")
             }
+            Sink::Find { .. } => Status::new(Status::IDENTIFIER_MISMATCH)
+                .with_comment("C-FIND without an identifier"),
             Sink::Discard(status) => status,
         };
         self.respond(&command, context_id, &status).await
@@ -507,23 +710,58 @@ impl<H: StoreHandler> Session<H> {
         Sink::Store { tx: Some(tx), task }
     }
 
+    /// Sends the final response to `request`, without a data set.
     async fn respond(
         &mut self,
         request: &Command,
         context_id: u8,
         status: &Status,
     ) -> Result<(), Error> {
-        let data = Command::response_to(request, status).encode()?;
+        self.send_message(context_id, &Command::response_to(request, status), None)
+            .await
+    }
+
+    /// Sends a message: the command and, fragmented to the peer's maximum PDU length, the data
+    /// set.
+    async fn send_message(
+        &mut self,
+        context_id: u8,
+        command: &Command,
+        data: Option<&[u8]>,
+    ) -> Result<(), Error> {
+        let pdv = |value_type, is_last, data: &[u8]| PDataValue {
+            presentation_context_id: context_id,
+            value_type,
+            is_last,
+            data: data.to_vec(),
+        };
         self.association
             .send(&Pdu::PData {
-                data: vec![PDataValue {
-                    presentation_context_id: context_id,
-                    value_type: PDataValueType::Command,
-                    is_last: true,
-                    data,
-                }],
+                data: vec![pdv(PDataValueType::Command, true, &command.encode()?)],
             })
             .await?;
+        if let Some(data) = data {
+            let max = self.association.requestor_max_pdu_length();
+            // A PDV item adds 6 bytes (length, context ID, header) to its fragment.
+            let fragment = if max == 0 {
+                1 << 20
+            } else {
+                (max as usize).saturating_sub(6).max(1)
+            };
+            let chunks: Vec<&[u8]> = if data.is_empty() {
+                vec![data]
+            } else {
+                data.chunks(fragment).collect()
+            };
+            let last = chunks.len() - 1;
+            for (i, chunk) in chunks.into_iter().enumerate() {
+                self.association
+                    .send(&Pdu::PData {
+                        data: vec![pdv(PDataValueType::Data, i == last, chunk)],
+                    })
+                    .await?;
+            }
+        }
         Ok(())
     }
 
@@ -540,6 +778,19 @@ impl<H: StoreHandler> Session<H> {
             )));
         }
     }
+}
+
+/// Encodes a data set in a transfer syntax, in the character set its Specific Character Set
+/// names.
+fn encode_data_set(
+    data_set: &InMemDicomObject,
+    ts: &dicom_encoding::TransferSyntax,
+) -> Result<Vec<u8>, Error> {
+    let mut out = Vec::new();
+    data_set
+        .write_dataset_with_ts(&mut out, ts)
+        .map_err(|e| Error::Protocol(format!("cannot encode data set: {e}")))?;
+    Ok(out)
 }
 
 /// The Part 10 preamble, magic code and File Meta Information for a received data set.

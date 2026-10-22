@@ -219,3 +219,238 @@ async fn unknown_calling_ae_is_rejected() {
     );
     node.stop_services().await;
 }
+
+/// Runs `findscu` with `keys` and returns the extracted responses, sorted by `sort`.
+async fn findscu(
+    bin: &Path,
+    port: u16,
+    model: &str,
+    keys: &[&str],
+    sort: dicom_core::Tag,
+) -> Vec<dicom_object::DefaultDicomObject> {
+    let out = tempfile::tempdir().unwrap();
+    let mut list = args(&["-aet", "DCMTKSCU", "-aec", "MEDICUS", model, "-X", "-od"]);
+    list.push(out.path().display().to_string());
+    for key in keys {
+        list.push("-k".into());
+        list.push((*key).to_owned());
+    }
+    list.extend(["127.0.0.1".to_owned(), port.to_string()]);
+    assert!(run(bin, "findscu", list).await);
+    let mut found: Vec<_> = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|e| dicom_object::open_file(e.unwrap().path()).unwrap())
+        .collect();
+    let value = |o: &dicom_object::DefaultDicomObject| {
+        o.element(sort)
+            .map(|e| e.to_str().unwrap().into_owned())
+            .unwrap_or_default()
+    };
+    found.sort_by_key(value);
+    found
+}
+
+fn text(obj: &dicom_object::DefaultDicomObject, tag: dicom_core::Tag) -> String {
+    obj.element(tag).map_or_else(
+        |_| panic!("{tag} missing"),
+        |e| e.to_str().unwrap().trim().to_owned(),
+    )
+}
+
+/// Two patients; Doe has two studies (CT, and MR with two series).
+async fn ingest_patients(node: &Node) {
+    use dicom_core::VR;
+    use dicom_dictionary_std::tags;
+    let instances = [
+        (
+            "1.9.1",
+            "1.9.1.1",
+            "1.9.1.1.1",
+            "Doe^John",
+            "P1",
+            "CT",
+            "SCANNER-A",
+        ),
+        (
+            "1.9.2",
+            "1.9.2.1",
+            "1.9.2.1.1",
+            "Doe^John",
+            "P1",
+            "MR",
+            "SCANNER-B",
+        ),
+        (
+            "1.9.2",
+            "1.9.2.2",
+            "1.9.2.2.1",
+            "Doe^John",
+            "P1",
+            "MR",
+            "SCANNER-B",
+        ),
+        (
+            "1.9.2",
+            "1.9.2.2",
+            "1.9.2.2.2",
+            "Doe^John",
+            "P1",
+            "MR",
+            "SCANNER-C",
+        ),
+        (
+            "1.9.3",
+            "1.9.3.1",
+            "1.9.3.1.1",
+            "Roe^Jane",
+            "P2",
+            "CT",
+            "SCANNER-A",
+        ),
+    ];
+    for (study, series, sop, name, pid, modality, model) in instances {
+        let file = InstanceBuilder::new(study, series, sop)
+            .attr(tags::PATIENT_NAME, VR::PN, name)
+            .attr(tags::PATIENT_ID, VR::LO, pid)
+            .attr(tags::MODALITY, VR::CS, modality)
+            .attr(tags::MANUFACTURER_MODEL_NAME, VR::LO, model)
+            .build();
+        let origin = Origin::Internal {
+            component: "test".into(),
+        };
+        node.archive
+            .ingest(medicus_testkit::stream(&file, 4096), origin)
+            .await
+            .unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn findscu_queries_every_level() {
+    use dicom_dictionary_std::tags;
+    let Some(bin) = dcmtk_bin() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let node = node_with_dimse(dir.path(), port, json!({})).await;
+    ingest_patients(&node).await;
+
+    // Patient root, PATIENT level, wildcard.
+    let found = findscu(
+        &bin,
+        port,
+        "-P",
+        &[
+            "QueryRetrieveLevel=PATIENT",
+            "PatientName=D*",
+            "PatientID",
+            "NumberOfPatientRelatedStudies",
+        ],
+        tags::PATIENT_ID,
+    )
+    .await;
+    assert_eq!(found.len(), 1);
+    assert_eq!(text(&found[0], tags::PATIENT_ID), "P1");
+    assert_eq!(
+        text(&found[0], tags::NUMBER_OF_PATIENT_RELATED_STUDIES),
+        "2"
+    );
+
+    // Study root, STUDY level: computed attributes and an empty requested attribute.
+    let found = findscu(
+        &bin,
+        port,
+        "-S",
+        &[
+            "QueryRetrieveLevel=STUDY",
+            "PatientID=P1",
+            "StudyInstanceUID",
+            "ModalitiesInStudy",
+            "NumberOfStudyRelatedInstances",
+            "AccessionNumber",
+            "RetrieveAETitle",
+        ],
+        tags::STUDY_INSTANCE_UID,
+    )
+    .await;
+    assert_eq!(
+        found
+            .iter()
+            .map(|o| text(o, tags::STUDY_INSTANCE_UID))
+            .collect::<Vec<_>>(),
+        ["1.9.1", "1.9.2"]
+    );
+    assert_eq!(text(&found[1], tags::MODALITIES_IN_STUDY), "MR");
+    assert_eq!(
+        text(&found[1], tags::NUMBER_OF_STUDY_RELATED_INSTANCES),
+        "3"
+    );
+    assert_eq!(text(&found[1], tags::ACCESSION_NUMBER), "");
+    assert_eq!(text(&found[1], tags::RETRIEVE_AE_TITLE), "MEDICUS");
+
+    // SERIES level below one study.
+    let found = findscu(
+        &bin,
+        port,
+        "-S",
+        &[
+            "QueryRetrieveLevel=SERIES",
+            "StudyInstanceUID=1.9.2",
+            "SeriesInstanceUID",
+            "NumberOfSeriesRelatedInstances",
+        ],
+        tags::SERIES_INSTANCE_UID,
+    )
+    .await;
+    assert_eq!(
+        found
+            .iter()
+            .map(|o| text(o, tags::SERIES_INSTANCE_UID))
+            .collect::<Vec<_>>(),
+        ["1.9.2.1", "1.9.2.2"]
+    );
+    assert_eq!(
+        text(&found[1], tags::NUMBER_OF_SERIES_RELATED_INSTANCES),
+        "2"
+    );
+
+    // IMAGE level on an attribute the index does not store (answered from the headers).
+    let found = findscu(
+        &bin,
+        port,
+        "-S",
+        &[
+            "QueryRetrieveLevel=IMAGE",
+            "StudyInstanceUID=1.9.2",
+            "SeriesInstanceUID=1.9.2.2",
+            "SOPInstanceUID",
+            "ManufacturerModelName=SCANNER-C",
+        ],
+        tags::SOP_INSTANCE_UID,
+    )
+    .await;
+    assert_eq!(found.len(), 1);
+    assert_eq!(text(&found[0], tags::SOP_INSTANCE_UID), "1.9.2.2.2");
+    assert_eq!(text(&found[0], tags::MANUFACTURER_MODEL_NAME), "SCANNER-C");
+
+    // Study root has no PATIENT level.
+    assert!(findscu_fails(&bin, port, &["QueryRetrieveLevel=PATIENT", "PatientID"]).await);
+    node.stop_services().await;
+}
+
+/// Whether a Study Root C-FIND with `keys` ends in a failure status.
+async fn findscu_fails(bin: &Path, port: u16, keys: &[&str]) -> bool {
+    let mut list = args(&["-aet", "DCMTKSCU", "-aec", "MEDICUS", "-S", "-v"]);
+    for key in keys {
+        list.push("-k".into());
+        list.push((*key).to_owned());
+    }
+    list.extend(["127.0.0.1".to_owned(), port.to_string()]);
+    let program = bin.join("findscu");
+    let output = tokio::task::spawn_blocking(move || Command::new(program).args(list).output())
+        .await
+        .unwrap()
+        .unwrap();
+    let log = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    log.contains("Final Find Response (Error: DataSetDoesNotMatchSOPClass)")
+}

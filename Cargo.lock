@@ -727,10 +727,16 @@ dependencies = [
 name = "dimse"
 version = "0.1.0"
 dependencies = [
+ "dicom-core",
+ "dicom-dictionary-std",
+ "dicom-json",
+ "dicom-object",
+ "futures",
  "medicus-addon-sdk",
  "medicus-core",
  "medicus-dimse",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-util",
  "tracing",

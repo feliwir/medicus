@@ -6,7 +6,7 @@ pub mod scp;
 pub mod storage;
 
 pub use command::{Command, CommandField, Status};
-pub use scp::{AssociationInfo, Scp, ScpOptions, StoreHandler, StoreRequest};
+pub use scp::{AssociationInfo, FindRequest, Handler, Matches, Scp, ScpOptions, StoreRequest};
 
 /// Implementation Class UID (0002,0012) of files received by medicus.
 pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.21299839958676251082708783506226217531";
