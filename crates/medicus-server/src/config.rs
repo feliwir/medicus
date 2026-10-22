@@ -9,6 +9,8 @@ use std::path::{Path, PathBuf};
 
 use figment::Figment;
 use figment::providers::{Env, Format, Serialized, Toml};
+use medicus_core::QueryLevel;
+use medicus_core::capability::index::{DuplicatePolicy, ExtraTag};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -17,7 +19,73 @@ pub(crate) struct Config {
     pub(crate) server: ServerConfig,
     pub(crate) http: HttpConfig,
     pub(crate) log: LogConfig,
+    pub(crate) archive: ArchiveConfig,
     pub(crate) addons: AddonsConfig,
+}
+
+/// How instances are stored and indexed.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct ArchiveConfig {
+    /// Registered name of the index to use.
+    pub(crate) index: String,
+    /// Registered name of the blob store new instances are written to.
+    pub(crate) storage: String,
+    pub(crate) duplicate_policy: DuplicatePolicy,
+    /// Largest accepted header (everything before Pixel Data), in bytes.
+    pub(crate) max_header_bytes: usize,
+    /// Attributes indexed in addition to the standard query keys.
+    pub(crate) extra_tags: Vec<ExtraTagConfig>,
+}
+
+impl Default for ArchiveConfig {
+    fn default() -> Self {
+        Self {
+            index: "sqlite".into(),
+            storage: "local".into(),
+            duplicate_policy: DuplicatePolicy::Overwrite,
+            max_header_bytes: 64 * 1024 * 1024,
+            extra_tags: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ExtraTagConfig {
+    /// Dictionary keyword (`SliceThickness`) or tag (`00180050`, `(0018,0050)`).
+    pub(crate) tag: String,
+    /// The level the attribute belongs to.
+    #[serde(default = "default_extra_level")]
+    pub(crate) level: QueryLevel,
+}
+
+fn default_extra_level() -> QueryLevel {
+    QueryLevel::Instance
+}
+
+impl ExtraTagConfig {
+    /// Resolves keyword or tag and the VR through the standard dictionary.
+    pub(crate) fn resolve(&self) -> Result<ExtraTag, String> {
+        use dicom_core::dictionary::{DataDictionary as _, DataDictionaryEntry as _, TagRange};
+        use dicom_dictionary_std::StandardDataDictionary;
+        let entry = match medicus_core::tag::parse_tag(&self.tag) {
+            Ok(tag) => StandardDataDictionary.by_tag(tag),
+            Err(_) => StandardDataDictionary.by_name(&self.tag),
+        }
+        .ok_or_else(|| format!("extra tag {:?} is not in the DICOM dictionary", self.tag))?;
+        let TagRange::Single(tag) = entry.tag_range() else {
+            return Err(format!(
+                "extra tag {:?} is a tag range, not a single attribute",
+                self.tag
+            ));
+        };
+        Ok(ExtraTag {
+            tag,
+            vr: entry.vr().relaxed(),
+            level: self.level,
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -94,9 +162,12 @@ pub(crate) struct AddonsConfig {
 pub(crate) struct AddonEntry {
     #[serde(default = "default_true")]
     pub(crate) enabled: bool,
+    /// Shared library to load. Without it, the addon must be built into the server.
+    #[serde(default)]
+    pub(crate) library: Option<PathBuf>,
     /// Optional SHA-256 (hex) the addon library must match before it is loaded.
     #[serde(default)]
-    pub sha256: Option<String>,
+    pub(crate) sha256: Option<String>,
     /// Addon-specific configuration, passed to the addon as JSON.
     #[serde(default)]
     pub(crate) config: serde_json::Value,

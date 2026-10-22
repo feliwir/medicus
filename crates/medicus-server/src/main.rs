@@ -1,6 +1,10 @@
 //! `medicus` — the core server binary.
 
+mod addons;
+mod archive;
 mod config;
+mod import;
+mod ingest;
 
 use std::path::PathBuf;
 
@@ -27,6 +31,13 @@ enum Command {
     Run,
     /// Validate the configuration and print the effective result as JSON.
     CheckConfig,
+    /// Import DICOM Part 10 files from a file or directory tree and print a summary as JSON.
+    Import {
+        path: PathBuf,
+        /// Files ingested concurrently.
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+    },
 }
 
 fn init_tracing(cfg: &config::LogConfig) {
@@ -65,18 +76,32 @@ async fn shutdown_signal() {
     }
 }
 
+/// Loads the addons and wires the archive.
+async fn start(cfg: &Config) -> anyhow::Result<archive::Archive> {
+    let caps = addons::load(cfg, &tokio::runtime::Handle::current())?;
+    archive::Archive::new(&caps, &cfg.archive).await
+}
+
 async fn run(cfg: Config) -> anyhow::Result<()> {
     tracing::info!(
         name = %cfg.server.name,
         data_dir = %cfg.server.data_dir.display(),
         http = %cfg.http.listen,
-        addons = cfg.addons.entries.len(),
         version = env!("CARGO_PKG_VERSION"),
         "medicus starting"
     );
+    let archive = start(&cfg).await?;
+    tracing::info!(?archive, "archive ready");
     shutdown_signal().await;
     tracing::info!("shutting down");
     Ok(())
+}
+
+fn runtime() -> anyhow::Result<tokio::runtime::Runtime> {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .context("starting async runtime")
 }
 
 fn main() -> anyhow::Result<()> {
@@ -93,11 +118,20 @@ fn main() -> anyhow::Result<()> {
         }
         Command::Run => {
             init_tracing(&cfg.log);
-            tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .build()
-                .context("starting async runtime")?
-                .block_on(run(cfg))
+            runtime()?.block_on(run(cfg))
+        }
+        Command::Import { path, concurrency } => {
+            init_tracing(&cfg.log);
+            let report = runtime()?.block_on(async {
+                let archive = start(&cfg).await?;
+                import::import(&archive, &path, concurrency).await
+            })?;
+            let out = serde_json::to_string_pretty(&report)?;
+            #[allow(clippy::print_stdout)] // the command's output
+            {
+                println!("{out}");
+            }
+            Ok(())
         }
     }
 }
