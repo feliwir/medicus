@@ -27,13 +27,21 @@ pub fn payload(len: usize) -> Vec<u8> {
         .collect()
 }
 
-/// A stream of `bytes` in chunks of `chunk` bytes.
+/// A stream of `bytes` in chunks of `chunk` bytes. Like streams that cross the addon ABI, it
+/// panics if polled again after it ended.
 pub fn stream(bytes: &[u8], chunk: usize) -> ByteStream {
     let chunks: Vec<medicus_core::Result<Bytes>> = bytes
         .chunks(chunk.max(1))
         .map(|c| Ok(Bytes::copy_from_slice(c)))
         .collect();
-    Box::pin(futures::stream::iter(chunks))
+    let mut chunks = chunks.into_iter();
+    let mut ended = false;
+    Box::pin(futures::stream::poll_fn(move |_| {
+        assert!(!ended, "stream polled after it ended");
+        let next = chunks.next();
+        ended = next.is_none();
+        std::task::Poll::Ready(next)
+    }))
 }
 
 /// Collects a stream into one buffer.

@@ -586,15 +586,20 @@ impl Imported {
         fut
     }
 
+    /// The stream as a [`ByteStream`]; fused, so polling it after the end keeps returning
+    /// `None`.
     pub fn into_byte_stream(self) -> ByteStream {
-        Box::pin(futures::stream::unfold(Some(self), |state| async move {
-            let stream = state?;
-            match stream.read().await {
-                Ok(buf) if buf.is_empty() => None,
-                Ok(buf) => Some((Ok(buf.into_bytes()), Some(stream))),
-                Err(e) => Some((Err(e), None)),
-            }
-        }))
+        Box::pin(
+            futures::stream::unfold(Some(self), |state| async move {
+                let stream = state?;
+                match stream.read().await {
+                    Ok(buf) if buf.is_empty() => None,
+                    Ok(buf) => Some((Ok(buf.into_bytes()), Some(stream))),
+                    Err(e) => Some((Err(e), None)),
+                }
+            })
+            .fuse(),
+        )
     }
 }
 

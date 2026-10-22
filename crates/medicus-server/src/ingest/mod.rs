@@ -32,8 +32,9 @@ const FIRST_ATTEMPT: usize = 16 * 1024;
 
 impl Archive {
     /// Reads the stream until dicom-rs has parsed the complete header. Returns the buffered
-    /// bytes (header and possibly some bulk data) and the parsed header.
-    async fn read_header(&self, data: &mut ByteStream) -> Result<(Bytes, ParsedHeader)> {
+    /// bytes (header and possibly some bulk data), the parsed header, and whether the stream is
+    /// already exhausted (a stream must not be polled again after it ended).
+    async fn read_header(&self, data: &mut ByteStream) -> Result<(Bytes, ParsedHeader, bool)> {
         let mut buf = BytesMut::new();
         let mut complete = false;
         let mut attempt_at = FIRST_ATTEMPT.min(self.max_header_bytes);
@@ -53,7 +54,7 @@ impl Archive {
             .await
             .map_err(|e| Error::internal(format!("header parser failed: {e}")))??;
             match parsed {
-                Some(header) => return Ok((buf.freeze(), header)),
+                Some(header) => return Ok((buf.freeze(), header, complete)),
                 None if buf.len() >= self.max_header_bytes => {
                     return Err(Error::new(
                         ErrorKind::ResourceExhausted,
@@ -71,7 +72,12 @@ impl Archive {
     /// Ingests one DICOM Part 10 file.
     pub async fn ingest(&self, mut data: ByteStream, origin: Origin) -> Result<Ingested> {
         self.ensure_capacity()?;
-        let (prefix, parsed) = self.read_header(&mut data).await?;
+        let (prefix, parsed, complete) = self.read_header(&mut data).await?;
+        let rest: ByteStream = if complete {
+            Box::pin(futures::stream::empty())
+        } else {
+            data
+        };
 
         // Stream the complete file: the buffered prefix, then the rest as it arrives.
         let store = self.store(&self.default_store)?;
@@ -80,7 +86,7 @@ impl Archive {
         let counter = written.clone();
         let file: ByteStream = Box::pin(
             futures::stream::once(async move { Ok(prefix) })
-                .chain(data)
+                .chain(rest)
                 .inspect(move |chunk| {
                     if let Ok(c) = chunk {
                         counter.fetch_add(c.len() as u64, Ordering::Relaxed);
