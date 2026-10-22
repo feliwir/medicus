@@ -3,7 +3,15 @@
 Versions refer to `MD_ABI_MAJOR.MD_ABI_MINOR`. While the major version is 0, every minor version
 is a breaking change.
 
-## 0.4 (unreleased)
+## 0.5 (unreleased)
+
+- Added `MD_CAP_REMOTE_NODE` with `MdRemoteNodeVtable`: protocol clients for peers, registered
+  under the protocol name. A single JSON `call` serves `echo` and `send` (send jobs).
+- Added the host method `job_progress` (via `MdHostApi::call`): executors report progress and
+  learn when a job was cancelled.
+- Index stores gained the methods `put_job`, `get_job`, `list_jobs` and `claim_job`.
+
+## 0.4
 
 - Added the host function `MdHostApi::call`: host services addressed by method name with JSON
   requests and responses — `query` (complete query answers), `locate` (stored instances of a study,

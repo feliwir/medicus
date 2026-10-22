@@ -14,6 +14,7 @@ pub mod schema;
 pub mod sql;
 
 mod extra;
+mod jobs;
 mod query;
 mod write;
 
@@ -22,11 +23,11 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use async_trait::async_trait;
-use medicus_core::capability::IndexStore;
 use medicus_core::capability::index::{
     DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagState, ExtraTagStatus,
     InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome,
 };
+use medicus_core::capability::{IndexStore, Job, JobState};
 use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -324,5 +325,25 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         tx.commit().await?;
         self.set_cached_extras(extras);
         Ok(())
+    }
+    async fn put_job(&self, job: &Job) -> Result<()> {
+        jobs::put(&self.backend, job).await
+    }
+
+    async fn get_job(&self, id: uuid::Uuid) -> Result<Option<Job>> {
+        jobs::get(&self.backend, id).await
+    }
+
+    async fn list_jobs(
+        &self,
+        state: Option<JobState>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<Job>> {
+        jobs::list(&self.backend, state, limit, offset).await
+    }
+
+    async fn claim_job(&self, now: time::OffsetDateTime) -> Result<Option<Job>> {
+        jobs::claim(&self.backend, now).await
     }
 }

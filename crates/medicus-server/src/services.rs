@@ -1,35 +1,22 @@
-//! The host services offered to addons: the archive plus node-level configuration (peers).
+//! The host services offered to addons: the archive plus node-level services (peers, jobs).
 
 use std::sync::Arc;
 
 use medicus_core::Result;
 use medicus_core::capability::index::{InstanceLocation, QueryResult, ResourceUid};
-use medicus_core::capability::{ByteStream, Endpoint, HostServices, Ingested, Peer};
+use medicus_core::capability::{ByteStream, HostServices, Ingested, JobProgress, Peer};
 use medicus_core::event::Origin;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
+use uuid::Uuid;
 
 use crate::archive::Archive;
+use crate::jobs::Jobs;
 
 #[derive(Debug)]
 pub(crate) struct NodeServices {
     pub(crate) archive: Arc<Archive>,
-    pub(crate) peers: Vec<Peer>,
-}
-
-impl NodeServices {
-    pub(crate) fn new(
-        archive: Arc<Archive>,
-        peers: impl IntoIterator<Item = (String, Endpoint)>,
-    ) -> Self {
-        Self {
-            archive,
-            peers: peers
-                .into_iter()
-                .map(|(name, endpoint)| Peer { name, endpoint })
-                .collect(),
-        }
-    }
+    pub(crate) jobs: Arc<Jobs>,
 }
 
 #[async_trait::async_trait]
@@ -51,6 +38,10 @@ impl HostServices for NodeServices {
     }
 
     async fn peers(&self) -> Result<Vec<Peer>> {
-        Ok(self.peers.clone())
+        Ok(self.jobs.peers().cloned().collect())
+    }
+
+    async fn job_progress(&self, job: Uuid, progress: JobProgress) -> Result<bool> {
+        self.jobs.progress(job, progress).await
     }
 }

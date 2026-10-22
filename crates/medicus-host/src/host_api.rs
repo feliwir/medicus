@@ -6,13 +6,13 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use medicus_abi::bridge::{CompletionGuard, StreamCompletionGuard, export_stream, import_stream};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_SERVICE,
-    MD_INVALID_ARGUMENT, MD_LOG_DEBUG, MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN, MD_OK,
-    MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer, MdCancel, MdCompletion, MdHostApi, MdReadStream,
-    MdStatus, MdStr, MdStreamCompletion,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_REMOTE_NODE,
+    MD_CAP_SERVICE, MD_INVALID_ARGUMENT, MD_LOG_DEBUG, MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN,
+    MD_OK, MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer, MdCancel, MdCompletion, MdHostApi,
+    MdReadStream, MdStatus, MdStr, MdStreamCompletion,
 };
-use medicus_core::capability::HostServices;
 use medicus_core::capability::index::ResourceUid;
+use medicus_core::capability::{HostServices, JobProgress};
 use medicus_core::event::Origin;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -128,7 +128,11 @@ unsafe extern "C" fn host_register_capability(
     }
     if !matches!(
         kind,
-        MD_CAP_BLOB_STORE | MD_CAP_EVENT_HOOK | MD_CAP_INDEX_STORE | MD_CAP_SERVICE
+        MD_CAP_BLOB_STORE
+            | MD_CAP_EVENT_HOOK
+            | MD_CAP_INDEX_STORE
+            | MD_CAP_SERVICE
+            | MD_CAP_REMOTE_NODE
     ) {
         tracing::warn!(addon = %ctx.addon, kind, "unsupported capability kind; refused");
         return MD_UNSUPPORTED;
@@ -212,6 +216,13 @@ enum Call {
     Query(Query),
     Locate(ResourceUid),
     Peers,
+    JobProgress(JobProgressRequest),
+}
+
+#[derive(serde::Deserialize)]
+struct JobProgressRequest {
+    job: uuid::Uuid,
+    progress: JobProgress,
 }
 
 impl Call {
@@ -220,6 +231,7 @@ impl Call {
             b"query" => parse("query", request).map(Self::Query),
             b"locate" => parse("resource", request).map(Self::Locate),
             b"peers" => Ok(Self::Peers),
+            b"job_progress" => parse("job progress", request).map(Self::JobProgress),
             other => Err(Error::unsupported(format!(
                 "unknown host method {:?}",
                 String::from_utf8_lossy(other)
@@ -232,6 +244,7 @@ impl Call {
             Self::Query(q) => to_buffer(&services.query(&q).await?),
             Self::Locate(r) => to_buffer(&services.locate(&r).await?),
             Self::Peers => to_buffer(&services.peers().await?),
+            Self::JobProgress(r) => to_buffer(&services.job_progress(r.job, r.progress).await?),
         }
     }
 }

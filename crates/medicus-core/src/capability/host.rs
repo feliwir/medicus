@@ -9,12 +9,14 @@ use serde::{Deserialize, Serialize};
 use crate::AeTitle;
 use crate::capability::ByteStream;
 use crate::capability::index::{Duplicate, InstanceLocation, QueryResult, ResourceUid};
+use crate::capability::job::JobProgress;
 use crate::error::Result;
 use crate::event::Origin;
 use crate::query::Query;
 use crate::uid::{
     SeriesInstanceUid, SopClassUid, SopInstanceUid, StudyInstanceUid, TransferSyntaxUid,
 };
+use uuid::Uuid;
 
 /// The result of ingesting one instance.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -70,6 +72,10 @@ pub trait HostServices: Send + Sync + 'static {
 
     /// The configured peers.
     async fn peers(&self) -> Result<Vec<Peer>>;
+
+    /// Reports the progress of a running job; returns `false` once the job was cancelled, after
+    /// which the executor should stop.
+    async fn job_progress(&self, job: Uuid, progress: JobProgress) -> Result<bool>;
 }
 
 /// A long-running background service of an addon (e.g. a network listener). The host starts it

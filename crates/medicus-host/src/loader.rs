@@ -4,15 +4,17 @@ use std::sync::atomic::Ordering;
 
 use medicus_abi::bridge::{abi_compatible, abi_version_string, target};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_SERVICE,
-    MdAbiVersionFn, MdAddonInfo, MdBlobStoreVtable, MdEventHookVtable, MdIndexStoreVtable,
-    MdInitFn, MdServiceVtable,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_REMOTE_NODE,
+    MD_CAP_SERVICE, MdAbiVersionFn, MdAddonInfo, MdBlobStoreVtable, MdEventHookVtable,
+    MdIndexStoreVtable, MdInitFn, MdRemoteNodeVtable, MdServiceVtable,
 };
 use medicus_abi::{SYMBOL_ABI_VERSION, SYMBOL_INIT, StaticAddon};
-use medicus_core::capability::{BlobStore, EventHook, HostServices, IndexStore, Service};
+use medicus_core::capability::{
+    BlobStore, EventHook, HostServices, IndexStore, RemoteNode, Service,
+};
 use tokio::runtime::Handle;
 
-use crate::adapters::{FfiBlobStore, FfiEventHook, FfiIndexStore, FfiService};
+use crate::adapters::{FfiBlobStore, FfiEventHook, FfiIndexStore, FfiRemoteNode, FfiService};
 use crate::host_api::{RawRegistration, ServicesSlot, new_host_api};
 
 #[derive(Debug, thiserror::Error)]
@@ -63,6 +65,8 @@ pub struct LoadedAddon {
     pub event_hooks: Vec<Named<Arc<dyn EventHook>>>,
     pub index_stores: Vec<Named<Arc<dyn IndexStore>>>,
     pub services: Vec<Named<Arc<dyn Service>>>,
+    /// Protocol clients, named by protocol.
+    pub remote_nodes: Vec<Named<Arc<dyn RemoteNode>>>,
 }
 
 impl std::fmt::Debug for LoadedAddon {
@@ -76,6 +80,7 @@ impl std::fmt::Debug for LoadedAddon {
             .field("event_hooks", &names(&self.event_hooks))
             .field("index_stores", &names(&self.index_stores))
             .field("services", &names(&self.services))
+            .field("remote_nodes", &names(&self.remote_nodes))
             .finish()
     }
 }
@@ -189,6 +194,7 @@ impl AddonLoader {
             event_hooks: Vec::new(),
             index_stores: Vec::new(),
             services: Vec::new(),
+            remote_nodes: Vec::new(),
         };
         for reg in registrations {
             self.adapt(&mut loaded, reg);
@@ -278,6 +284,23 @@ impl AddonLoader {
                     value: Arc::new(service),
                 });
             }
+            MD_CAP_REMOTE_NODE => {
+                // SAFETY: as above, for MD_CAP_REMOTE_NODE.
+                let vtable = unsafe { &*reg.vtable.cast::<MdRemoteNodeVtable>() };
+                if vtable.size < size_of::<MdRemoteNodeVtable>() {
+                    tracing::error!(%addon, name = %reg.name, "remote node vtable too small; ignored");
+                    return;
+                }
+                let node = FfiRemoteNode {
+                    addon,
+                    vtable,
+                    instance: reg.instance,
+                };
+                loaded.remote_nodes.push(Named {
+                    name: reg.name,
+                    value: Arc::new(node),
+                });
+            }
             // Unknown kinds were refused at registration time.
             _ => {}
         }
@@ -296,6 +319,7 @@ impl AddonLoader {
             event_hooks: Vec::new(),
             index_stores: Vec::new(),
             services: Vec::new(),
+            remote_nodes: Vec::new(),
         };
         for reg in registrations {
             self.adapt(&mut tmp, reg);

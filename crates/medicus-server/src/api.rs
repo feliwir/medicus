@@ -13,6 +13,7 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures::{Stream, TryStreamExt as _};
 use medicus_core::capability::index::ResourceUid;
+use medicus_core::capability::{Job, JobKind, JobState, Peer};
 use medicus_core::event::{Event, EventKind, Origin};
 use medicus_core::uid::{SeriesInstanceUid, SopInstanceUid, StudyInstanceUid};
 use medicus_core::{Error, ErrorKind};
@@ -25,6 +26,7 @@ use crate::archive::Archive;
 #[derive(Debug, Clone)]
 pub(crate) struct AppState {
     pub(crate) archive: Arc<Archive>,
+    pub(crate) jobs: Arc<crate::jobs::Jobs>,
     pub(crate) name: String,
     pub(crate) addons: Arc<[medicus_host::AddonInfo]>,
 }
@@ -40,12 +42,101 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/series/{uid}", delete(delete_series))
         .route("/studies/{uid}", delete(delete_study))
         .route("/events", get(list_events))
-        .route("/events/stream", get(stream_events));
+        .route("/events/stream", get(stream_events))
+        .route("/peers", get(list_peers))
+        .route("/peers/{name}/echo", post(echo_peer))
+        .route("/peers/{name}/send", post(send_to_peer))
+        .route("/jobs", get(list_jobs))
+        .route("/jobs/{id}", get(get_job))
+        .route("/jobs/{id}/cancel", post(cancel_job));
     Router::new()
         .route("/health/live", get(|| async { "ok" }))
         .route("/health/ready", get(ready))
         .nest("/api/v1", v1)
         .with_state(state)
+}
+
+// ------------------------------------------------------------------------------------------------
+// Peers and jobs
+
+async fn list_peers(State(s): State<AppState>) -> Json<Vec<Peer>> {
+    Json(s.jobs.peers().cloned().collect())
+}
+
+async fn echo_peer(State(s): State<AppState>, Path(name): Path<String>) -> ApiResult<StatusCode> {
+    s.jobs.echo(&name).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SendRequest {
+    /// `[{"level": "study" | "series" | "instance", "uid": ...}, ...]`
+    resources: Vec<ResourceUid>,
+}
+
+/// A job as returned by the API, with its id also as a DICOM UID.
+#[derive(Debug, Serialize)]
+struct JobView {
+    #[serde(flatten)]
+    job: Job,
+    transaction_uid: String,
+}
+
+impl From<Job> for JobView {
+    fn from(job: Job) -> Self {
+        Self {
+            transaction_uid: job.transaction_uid(),
+            job,
+        }
+    }
+}
+
+async fn send_to_peer(
+    State(s): State<AppState>,
+    Path(name): Path<String>,
+    Json(request): Json<SendRequest>,
+) -> ApiResult<(StatusCode, Json<JobView>)> {
+    let job = s
+        .jobs
+        .submit(JobKind::Send {
+            peer: name,
+            resources: request.resources,
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(job.into())))
+}
+
+#[derive(Debug, Deserialize)]
+struct JobsQuery {
+    state: Option<JobState>,
+    #[serde(default = "default_limit")]
+    limit: u32,
+    #[serde(default)]
+    offset: u64,
+}
+
+async fn list_jobs(
+    State(s): State<AppState>,
+    Query(q): Query<JobsQuery>,
+) -> ApiResult<Json<Vec<JobView>>> {
+    let jobs = s.jobs.list(q.state, q.limit.min(1000), q.offset).await?;
+    Ok(Json(jobs.into_iter().map(JobView::from).collect()))
+}
+
+fn job_id(raw: &str) -> Result<uuid::Uuid, ApiError> {
+    raw.parse()
+        .ok()
+        .or_else(|| Job::id_from_transaction_uid(raw))
+        .ok_or_else(|| ApiError(Error::invalid_argument(format!("invalid job id {raw:?}"))))
+}
+
+async fn get_job(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<JobView>> {
+    Ok(Json(s.jobs.get(job_id(&id)?).await?.into()))
+}
+
+async fn cancel_job(State(s): State<AppState>, Path(id): Path<String>) -> ApiResult<Json<JobView>> {
+    Ok(Json(s.jobs.cancel(job_id(&id)?).await?.into()))
 }
 
 /// An [`Error`] as an HTTP response with a JSON body.
@@ -307,8 +398,15 @@ mod tests {
         cfg.server.data_dir = dir.to_owned();
         let caps = crate::addons::load(&cfg, &tokio::runtime::Handle::current()).unwrap();
         let archive = Arc::new(Archive::new(&caps, &cfg.archive).await.unwrap());
+        let jobs = Arc::new(crate::jobs::Jobs::new(
+            archive.clone(),
+            [],
+            caps.remote_nodes.clone(),
+            cfg.jobs.clone(),
+        ));
         let state = AppState {
             archive: archive.clone(),
+            jobs,
             name: "test".into(),
             addons: caps.addons.clone().into(),
         };
@@ -495,5 +593,43 @@ mod tests {
             .unwrap();
         let next = String::from_utf8(next.to_vec()).unwrap();
         assert!(next.contains("id: 2"), "{next}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn peers_and_jobs_endpoints() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app(dir.path()).await;
+        let (status, body) = send(&app, request("GET", "/api/v1/peers", Body::empty())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_of(&body), json!([]));
+        let send_body = json!({ "resources": [{ "level": "study", "uid": "1.2.3" }] }).to_string();
+        let mut req = request("POST", "/api/v1/peers/nowhere/send", Body::from(send_body));
+        req.headers_mut()
+            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
+        assert_eq!(send(&app, req).await.0, StatusCode::NOT_FOUND);
+        let (status, body) = send(&app, request("GET", "/api/v1/jobs", Body::empty())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_of(&body), json!([]));
+        let missing = format!(
+            "/api/v1/jobs/{}",
+            Job::new(
+                JobKind::Send {
+                    peer: "p".into(),
+                    resources: vec![]
+                },
+                1
+            )
+            .transaction_uid()
+        );
+        assert_eq!(
+            send(&app, request("GET", &missing, Body::empty())).await.0,
+            StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            send(&app, request("GET", "/api/v1/jobs/nonsense", Body::empty()))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 }

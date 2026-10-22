@@ -11,6 +11,7 @@
 //! through the host's query service, so they see the same data as every other front-end.
 
 mod find;
+mod remote;
 mod retrieve;
 
 use std::collections::HashSet;
@@ -269,6 +270,13 @@ pub fn init(reg: &mut Registrar) -> Result<()> {
         scp: Arc::new(Scp::new(options, ingest)),
         running: Mutex::new(None),
     };
+    reg.register_remote_node(
+        "dimse",
+        remote::Dimse {
+            host: reg.host(),
+            ae_title: cfg.ae_title.clone(),
+        },
+    )?;
     reg.register_service("scp", listener)
 }
 

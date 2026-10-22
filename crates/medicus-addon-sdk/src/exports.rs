@@ -13,11 +13,14 @@ use futures::FutureExt as _;
 use medicus_abi::bridge::{CompletionGuard, StreamCompletionGuard, export_stream, import_stream};
 use medicus_abi::ffi::{
     MD_PANICKED, MdBlobStoreVtable, MdBuffer, MdCancel, MdCompletion, MdEventHookVtable,
-    MdIndexStoreVtable, MdRange, MdReadStream, MdServiceVtable, MdStr, MdStreamCompletion,
+    MdIndexStoreVtable, MdRange, MdReadStream, MdRemoteNodeVtable, MdServiceVtable, MdStr,
+    MdStreamCompletion,
 };
 use medicus_core::BlobKey;
 use medicus_core::capability::index::IndexRequest;
-use medicus_core::capability::{BlobStore, EventHook, IndexStore, Service};
+use medicus_core::capability::{
+    BlobStore, EventHook, IndexStore, RemoteNode, RemoteRequest, Service,
+};
 use medicus_core::event::Event;
 use medicus_core::{Error, Result};
 use serde::Serialize;
@@ -318,6 +321,14 @@ async fn dispatch_index(
             attributes,
         } => json(&index.update_extra(&instance, &attributes).await?),
         IndexRequest::MarkExtraReady { tag } => json(&index.mark_extra_ready(tag).await?),
+        IndexRequest::PutJob { job } => json(&index.put_job(&job).await?),
+        IndexRequest::GetJob { id } => json(&index.get_job(id).await?),
+        IndexRequest::ListJobs {
+            state,
+            limit,
+            offset,
+        } => json(&index.list_jobs(state, limit, offset).await?),
+        IndexRequest::ClaimJob { now } => json(&index.claim_job(now).await?),
     }
 }
 
@@ -346,6 +357,69 @@ pub(crate) unsafe extern "C" fn destroy_index_store(instance: *mut c_void) {
     guarded(|| {
         // SAFETY: called exactly once per instance created by `index_store`.
         drop(unsafe { Box::from_raw(instance.cast::<DynIndexStore>()) });
+    });
+}
+
+// ------------------------------------------------------------------------------------------------
+// RemoteNode
+
+type DynRemoteNode = Arc<dyn RemoteNode>;
+
+static REMOTE_NODE_VTABLE: MdRemoteNodeVtable = MdRemoteNodeVtable {
+    size: size_of::<MdRemoteNodeVtable>(),
+    call: remote_call,
+    destroy: destroy_remote_node,
+};
+
+pub(crate) fn remote_node(node: DynRemoteNode) -> (*const MdRemoteNodeVtable, *mut c_void) {
+    (
+        &raw const REMOTE_NODE_VTABLE,
+        Box::into_raw(Box::new(node)).cast(),
+    )
+}
+
+async fn dispatch_remote(
+    node: &dyn RemoteNode,
+    request: RemoteRequest,
+) -> Result<serde_json::Value> {
+    fn json<T: Serialize>(v: &T) -> Result<serde_json::Value> {
+        serde_json::to_value(v).map_err(|e| Error::internal(e.to_string()))
+    }
+    match request {
+        RemoteRequest::Echo { peer } => json(&node.echo(&peer).await?),
+        RemoteRequest::Send {
+            job,
+            peer,
+            instances,
+        } => json(&node.send(job, &peer, &instances).await?),
+    }
+}
+
+unsafe extern "C" fn remote_call(
+    instance: *mut c_void,
+    request: MdStr,
+    _cancel: MdCancel,
+    done: MdCompletion,
+) {
+    let guard = CompletionGuard::new(done);
+    guarded(move || {
+        // SAFETY: live instance; `request` is valid during this call.
+        let (node, bytes) = unsafe { (&*instance.cast::<DynRemoteNode>(), request.as_bytes()) };
+        let node = node.clone();
+        match serde_json::from_slice::<RemoteRequest>(bytes) {
+            Ok(req) => spawn_json(
+                guard,
+                async move { dispatch_remote(node.as_ref(), req).await },
+            ),
+            Err(e) => guard.err(&Error::invalid_argument(format!("invalid request: {e}"))),
+        }
+    });
+}
+
+pub(crate) unsafe extern "C" fn destroy_remote_node(instance: *mut c_void) {
+    guarded(|| {
+        // SAFETY: called exactly once per instance created by `remote_node`.
+        drop(unsafe { Box::from_raw(instance.cast::<DynRemoteNode>()) });
     });
 }
 

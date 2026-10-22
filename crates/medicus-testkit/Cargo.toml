@@ -18,6 +18,8 @@ dicom-object.workspace = true
 dicom-transfer-syntax-registry.workspace = true
 futures.workspace = true
 serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
 
 [lints]
 workspace = true

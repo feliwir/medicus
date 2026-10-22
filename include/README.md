@@ -115,5 +115,11 @@ Protocol addons reach the archive through `MdHostApi`, never through other addon
   peers).
 - `open_instance` takes a SOP Instance UID and completes with a read stream of the stored file.
 
+A protocol addon can also register a `MD_CAP_REMOTE_NODE` under its protocol's name (e.g.
+`dimse`) to serve the archive's peers of that protocol: its `call` gets `{"method": "echo",
+"peer": ...}` or `{"method": "send", "job": ..., "peer": ..., "instances": [...]}`, and a send
+reports progress with the host method `job_progress`, whose `false` result means the job was
+cancelled.
+
 All of them fail with `MD_UNAVAILABLE` until the archive is ready; background services are only
 started after that.

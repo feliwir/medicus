@@ -124,6 +124,74 @@ pub async fn suite(index: &dyn IndexStore) {
     counters_match_recount(index).await;
     deletion(index).await;
     counters_match_recount(index).await;
+    jobs(index).await;
+}
+
+/// Jobs: stored and replaced whole, listed newest first, claimed once each and only when due.
+async fn jobs(index: &dyn IndexStore) {
+    use medicus_core::capability::{Job, JobKind, JobState};
+    use time::{Duration, OffsetDateTime};
+
+    let send = |peer: &str| JobKind::Send {
+        peer: peer.to_owned(),
+        resources: vec![ResourceUid::Study(
+            StudyInstanceUid::parse("1.2.3").unwrap(),
+        )],
+    };
+    let now = OffsetDateTime::now_utc();
+    let mut first = Job::new(send("a"), 3);
+    first.created_at = now - Duration::seconds(10);
+    let mut second = Job::new(send("b"), 3);
+    second.created_at = now - Duration::seconds(5);
+    second.not_before = now + Duration::hours(1);
+    index.put_job(&first).await.unwrap();
+    index.put_job(&second).await.unwrap();
+    assert_eq!(
+        index.get_job(first.id).await.unwrap().as_ref(),
+        Some(&first)
+    );
+    assert_eq!(index.get_job(uuid::Uuid::now_v7()).await.unwrap(), None);
+    let listed: Vec<_> = index
+        .list_jobs(None, 10, 0)
+        .await
+        .unwrap()
+        .iter()
+        .map(|j| j.id)
+        .collect();
+    assert_eq!(listed, [second.id, first.id], "newest first");
+    assert_eq!(index.list_jobs(None, 1, 1).await.unwrap()[0].id, first.id);
+
+    // Only the due job is claimed, once.
+    let claimed = index.claim_job(now).await.unwrap().unwrap();
+    assert_eq!(claimed.id, first.id);
+    assert_eq!(claimed.state, JobState::Running);
+    assert_eq!(claimed.attempts, 1);
+    assert_eq!(index.claim_job(now).await.unwrap(), None);
+    let running = index
+        .list_jobs(Some(JobState::Running), 10, 0)
+        .await
+        .unwrap();
+    assert_eq!(running.iter().map(|j| j.id).collect::<Vec<_>>(), [first.id]);
+
+    // Replacing a job updates its scheduling columns too.
+    let mut finished = claimed;
+    finished.state = JobState::Succeeded;
+    index.put_job(&finished).await.unwrap();
+    assert!(
+        index
+            .list_jobs(Some(JobState::Running), 10, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert_eq!(
+        index
+            .claim_job(now + Duration::hours(2))
+            .await
+            .unwrap()
+            .map(|j| j.id),
+        Some(second.id)
+    );
 }
 
 /// Maintained counters (`NumberOfStudyRelated*`, `NumberOfSeriesRelatedInstances`) must always

@@ -20,7 +20,7 @@ use core::ffi::c_void;
 /// Major ABI version. While it is 0, every minor change is breaking.
 pub const MD_ABI_MAJOR: u32 = 0;
 /// Minor ABI version.
-pub const MD_ABI_MINOR: u32 = 4;
+pub const MD_ABI_MINOR: u32 = 5;
 /// `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
 pub const MD_ABI_VERSION: u32 = (MD_ABI_MAJOR << 16) | MD_ABI_MINOR;
 
@@ -44,6 +44,7 @@ pub const MD_CAP_BLOB_STORE: u32 = 1;
 pub const MD_CAP_EVENT_HOOK: u32 = 2;
 pub const MD_CAP_INDEX_STORE: u32 = 3;
 pub const MD_CAP_SERVICE: u32 = 4;
+pub const MD_CAP_REMOTE_NODE: u32 = 5;
 
 /// Log levels for `MdHostApi::log`.
 pub const MD_LOG_ERROR: u32 = 1;
@@ -153,7 +154,8 @@ pub struct MdHostApi {
     ),
     /// Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
     /// Methods: `query` (a query AST → one page of results), `locate` (a study, series or
-    /// instance → its stored instances), `peers` (`null` → the configured peers). Unknown
+    /// instance → its stored instances), `peers` (`null` → the configured peers), `job_progress`
+    /// (`{"job", "progress"}` → `true`, or `false` once the job was cancelled). Unknown
     /// methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
     /// ready.
     pub call: unsafe extern "C" fn(
@@ -258,6 +260,22 @@ pub struct MdEventHookVtable {
 #[repr(C)]
 #[derive(Debug)]
 pub struct MdIndexStoreVtable {
+    pub size: usize,
+    pub call: unsafe extern "C" fn(
+        instance: *mut c_void,
+        request: MdStr,
+        cancel: MdCancel,
+        done: MdCompletion,
+    ),
+    pub destroy: unsafe extern "C" fn(instance: *mut c_void),
+}
+
+/// `MD_CAP_REMOTE_NODE`: a protocol client for peers, registered under the protocol's name (e.g.
+/// `dimse`). Like the index store, a single `call` takes a JSON request (`{"method": "echo" |
+/// "send", ...}`) and completes with a JSON result.
+#[repr(C)]
+#[derive(Debug)]
+pub struct MdRemoteNodeVtable {
     pub size: usize,
     pub call: unsafe extern "C" fn(
         instance: *mut c_void,

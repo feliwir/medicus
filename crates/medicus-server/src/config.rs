@@ -24,6 +24,29 @@ pub struct Config {
     pub addons: AddonsConfig,
     /// Remote nodes by name, e.g. `[peers.pacs] protocol = "dimse", ae_title = "PACS", ...`.
     pub peers: BTreeMap<String, Endpoint>,
+    pub jobs: JobsConfig,
+}
+
+/// The job engine (PLAN §3.5).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct JobsConfig {
+    /// Jobs running at the same time.
+    pub concurrency: usize,
+    /// Attempts per job before it fails.
+    pub max_attempts: u32,
+    /// Delay before the first retry; it doubles with every further attempt (up to an hour).
+    pub retry_base_secs: u64,
+}
+
+impl Default for JobsConfig {
+    fn default() -> Self {
+        Self {
+            concurrency: 4,
+            max_attempts: 5,
+            retry_base_secs: 30,
+        }
+    }
 }
 
 /// How instances are stored and indexed.

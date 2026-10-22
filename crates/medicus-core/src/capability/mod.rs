@@ -14,9 +14,11 @@ use serde::{Deserialize, Serialize};
 
 pub mod host;
 pub mod index;
+pub mod job;
 
 pub use host::{Endpoint, HostServices, Ingested, Peer, Service};
 pub use index::IndexStore;
+pub use job::{Job, JobKind, JobProgress, JobState, RemoteNode, RemoteRequest, SendOutcome};
 
 use crate::BlobKey;
 use crate::error::Result;
@@ -33,6 +35,7 @@ pub enum CapabilityKind {
     EventHook,
     IndexStore,
     Service,
+    RemoteNode,
 }
 
 /// Metadata of a stored blob.

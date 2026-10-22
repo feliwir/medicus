@@ -12,7 +12,7 @@ pub use scp::{
     AssociationInfo, Destination, FindRequest, Handler, Matches, RetrieveRequest, Scp, ScpOptions,
     StoreRequest,
 };
-pub use scu::{Instance, MoveOriginator, ScuOptions, StoreScu};
+pub use scu::{Instance, MAX_CONTEXTS, MoveOriginator, ScuOptions, StoreScu, echo};
 
 /// Implementation Class UID (0002,0012) of files received by medicus.
 pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.21299839958676251082708783506226217531";

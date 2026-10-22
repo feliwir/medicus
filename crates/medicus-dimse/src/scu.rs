@@ -45,6 +45,37 @@ impl ScuOptions {
     }
 }
 
+/// Verifies that the peer answers DIMSE (C-ECHO); returns its status.
+pub async fn echo(options: &ScuOptions) -> Result<Status, Error> {
+    let mut builder = ClientAssociationOptions::new()
+        .calling_ae_title(options.calling_ae.clone())
+        .called_ae_title(options.called_ae.clone())
+        .max_pdu_length(options.max_pdu_length)
+        .with_abstract_syntax(dicom_dictionary_std::uids::VERIFICATION);
+    if let Some(timeout) = options.timeout {
+        builder = builder
+            .connection_timeout(timeout)
+            .read_timeout(timeout)
+            .write_timeout(timeout);
+    }
+    let mut association = builder.establish_async(options.address.as_str()).await?;
+    let context_id = association
+        .presentation_contexts()
+        .iter()
+        .find(|pc| pc.reason == PresentationContextResultReason::Acceptance)
+        .map(|pc| pc.id)
+        .ok_or_else(|| Error::Protocol("the peer does not accept Verification".into()))?;
+    message::send_command(&mut association, context_id, &Command::echo_rq(1)).await?;
+    let response = message::receive_message(&mut association).await?;
+    let status = Status::new(
+        response
+            .status()
+            .ok_or_else(|| Error::Protocol("C-ECHO-RSP without a status".into()))?,
+    );
+    let _ = association.release().await;
+    Ok(status)
+}
+
 /// An instance to send: its identity and how it is encoded.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Instance {

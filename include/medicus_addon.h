@@ -19,7 +19,7 @@
 /**
  * Minor ABI version.
  */
-#define MD_ABI_MINOR 4
+#define MD_ABI_MINOR 5
 
 /**
  * `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
@@ -36,6 +36,8 @@
 #define MD_CAP_INDEX_STORE 3
 
 #define MD_CAP_SERVICE 4
+
+#define MD_CAP_REMOTE_NODE 5
 
 /**
  * Log levels for `MdHostApi::log`.
@@ -161,7 +163,8 @@ typedef struct MdHostApi {
   /**
    * Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
    * Methods: `query` (a query AST → one page of results), `locate` (a study, series or
-   * instance → its stored instances), `peers` (`null` → the configured peers). Unknown
+   * instance → its stored instances), `peers` (`null` → the configured peers), `job_progress`
+   * (`{"job", "progress"}` → `true`, or `false` once the job was cancelled). Unknown
    * methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
    * ready.
    */
@@ -285,6 +288,20 @@ typedef struct MdServiceVtable {
   void (*stop)(void *instance, struct MdCompletion done);
   void (*destroy)(void *instance);
 } MdServiceVtable;
+
+/**
+ * `MD_CAP_REMOTE_NODE`: a protocol client for peers, registered under the protocol's name (e.g.
+ * `dimse`). Like the index store, a single `call` takes a JSON request (`{"method": "echo" |
+ * "send", ...}`) and completes with a JSON result.
+ */
+typedef struct MdRemoteNodeVtable {
+  size_t size;
+  void (*call)(void *instance,
+               struct MdStr request,
+               struct MdCancel cancel,
+               struct MdCompletion done);
+  void (*destroy)(void *instance);
+} MdRemoteNodeVtable;
 
 /**
  * Signature of the exported `medicus_addon_abi_version` symbol.

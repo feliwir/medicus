@@ -11,6 +11,7 @@ mod dcmtk_tests;
 mod events;
 mod import;
 mod ingest;
+mod jobs;
 mod query;
 mod services;
 
@@ -25,11 +26,13 @@ pub use archive::Archive;
 pub use config::{Config, LogConfig, LogFormat};
 pub use import::ImportReport;
 pub use medicus_core::capability::Ingested;
+use medicus_core::capability::Peer;
 
 /// A running archive: loaded addons and the wired archive service.
 #[derive(Debug)]
 pub struct Node {
     pub archive: Arc<Archive>,
+    jobs: Arc<jobs::Jobs>,
     caps: addons::Capabilities,
     cfg: Config,
 }
@@ -39,14 +42,29 @@ impl Node {
     pub async fn open(cfg: Config) -> anyhow::Result<Self> {
         let caps = addons::load(&cfg, &tokio::runtime::Handle::current())?;
         let archive = Arc::new(Archive::new(&caps, &cfg.archive).await?);
+        let peers = cfg.peers.iter().map(|(name, endpoint)| Peer {
+            name: name.clone(),
+            endpoint: endpoint.clone(),
+        });
+        let jobs = Arc::new(jobs::Jobs::new(
+            archive.clone(),
+            peers,
+            caps.remote_nodes.clone(),
+            cfg.jobs.clone(),
+        ));
         if let Some(loader) = &caps.loader {
-            loader.bind_services(Arc::new(services::NodeServices::new(
-                archive.clone(),
-                cfg.peers.clone(),
-            )));
+            loader.bind_services(Arc::new(services::NodeServices {
+                archive: archive.clone(),
+                jobs: jobs.clone(),
+            }));
         }
         tracing::info!(?archive, "archive ready");
-        Ok(Self { archive, caps, cfg })
+        Ok(Self {
+            archive,
+            jobs,
+            caps,
+            cfg,
+        })
     }
 
     /// Serves the HTTP API and delivers events until `shutdown` resolves, then stops gracefully.
@@ -57,10 +75,12 @@ impl Node {
         let stop = CancellationToken::new();
         let mut deliveries = events::spawn(&self.archive, self.caps.event_hooks.clone(), &stop);
         let capacity = tokio::spawn(capacity::monitor(self.archive.clone(), stop.clone()));
+        let jobs = tokio::spawn(self.jobs.clone().run(stop.clone()));
         self.start_services().await?;
 
         let state = api::AppState {
             archive: self.archive.clone(),
+            jobs: self.jobs.clone(),
             name: self.cfg.server.name.clone(),
             addons: self.caps.addons.clone().into(),
         };
@@ -84,6 +104,7 @@ impl Node {
         stop.cancel();
         while deliveries.join_next().await.is_some() {}
         let _ = capacity.await;
+        let _ = jobs.await;
         Ok(())
     }
 

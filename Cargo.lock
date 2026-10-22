@@ -740,6 +740,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1376,6 +1377,7 @@ dependencies = [
  "serde_json",
  "time",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1753,6 +1755,7 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1831,8 +1834,10 @@ dependencies = [
  "tempfile",
  "test-addon",
  "thiserror",
+ "time",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -1865,11 +1870,13 @@ dependencies = [
  "storage-fs",
  "tempfile",
  "thiserror",
+ "time",
  "tokio",
  "tokio-util",
  "tower",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
@@ -1885,6 +1892,8 @@ dependencies = [
  "futures",
  "medicus-core",
  "serde_json",
+ "time",
+ "uuid",
 ]
 
 [[package]]

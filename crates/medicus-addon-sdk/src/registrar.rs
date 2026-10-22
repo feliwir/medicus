@@ -5,11 +5,11 @@ use std::sync::Arc;
 
 use medicus_abi::bridge::{OwnedBuffer, target};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_SERVICE,
-    MD_OK, MdAddonInfo, MdHostApi, MdStr,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_REMOTE_NODE,
+    MD_CAP_SERVICE, MD_OK, MdAddonInfo, MdHostApi, MdStr,
 };
 use medicus_core::Error;
-use medicus_core::capability::{BlobStore, EventHook, IndexStore, Service};
+use medicus_core::capability::{BlobStore, EventHook, IndexStore, RemoteNode, Service};
 use serde::de::DeserializeOwned;
 
 use crate::{exports, logging};
@@ -98,6 +98,22 @@ impl Registrar {
             vtable.cast(),
             instance,
             exports::destroy_service,
+        )
+    }
+
+    /// Registers a protocol client for peers; `protocol` is the peers' `protocol` (e.g. `dimse`).
+    pub fn register_remote_node(
+        &mut self,
+        protocol: &str,
+        node: impl RemoteNode,
+    ) -> Result<(), Error> {
+        let (vtable, instance) = exports::remote_node(Arc::new(node));
+        self.register(
+            MD_CAP_REMOTE_NODE,
+            protocol,
+            vtable.cast(),
+            instance,
+            exports::destroy_remote_node,
         )
     }
 

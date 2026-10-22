@@ -9,8 +9,8 @@ use medicus_abi::bridge::{
     Completion, OwnedBuffer, StreamCompletion, completion, export_stream, stream_completion,
 };
 use medicus_abi::ffi::{
-    MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange, MdServiceVtable,
-    MdStr,
+    MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange,
+    MdRemoteNodeVtable, MdServiceVtable, MdStr,
 };
 use medicus_core::BlobKey;
 use medicus_core::Tag;
@@ -21,7 +21,9 @@ use medicus_core::capability::index::{
 use medicus_core::capability::{
     BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, StorageUsage,
 };
-use medicus_core::capability::{IndexStore, Service};
+use medicus_core::capability::{
+    IndexStore, Job, JobState, Peer, RemoteNode, RemoteRequest, SendOutcome, Service,
+};
 use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -343,11 +345,99 @@ impl IndexStore for FfiIndexStore {
     async fn mark_extra_ready(&self, tag: Tag) -> Result<()> {
         self.call(IndexRequest::MarkExtraReady { tag }).await
     }
+
+    async fn put_job(&self, job: &Job) -> Result<()> {
+        self.call(IndexRequest::PutJob {
+            job: Box::new(job.clone()),
+        })
+        .await
+    }
+
+    async fn get_job(&self, id: uuid::Uuid) -> Result<Option<Job>> {
+        self.call(IndexRequest::GetJob { id }).await
+    }
+
+    async fn list_jobs(
+        &self,
+        state: Option<JobState>,
+        limit: u32,
+        offset: u64,
+    ) -> Result<Vec<Job>> {
+        self.call(IndexRequest::ListJobs {
+            state,
+            limit,
+            offset,
+        })
+        .await
+    }
+
+    async fn claim_job(&self, now: time::OffsetDateTime) -> Result<Option<Job>> {
+        self.call(IndexRequest::ClaimJob { now }).await
+    }
 }
 
 impl Drop for FfiIndexStore {
     fn drop(&mut self) {
         tracing::debug!(addon = %self.addon, "destroying index store");
+        // SAFETY: as for `FfiBlobStore`.
+        unsafe { (self.vtable.destroy)(self.instance) };
+    }
+}
+
+/// A `RemoteNode` implemented by an addon.
+pub(crate) struct FfiRemoteNode {
+    pub addon: String,
+    pub vtable: &'static MdRemoteNodeVtable,
+    pub instance: *mut c_void,
+}
+
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Send for FfiRemoteNode {}
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Sync for FfiRemoteNode {}
+
+impl FfiRemoteNode {
+    async fn call<T: DeserializeOwned>(&self, request: &RemoteRequest) -> Result<T> {
+        let json = serde_json::to_vec(request).map_err(|e| Error::internal(e.to_string()))?;
+        let (done, fut) = completion();
+        // SAFETY: live instance; `json` outlives the call.
+        unsafe {
+            (self.vtable.call)(
+                self.instance,
+                MdStr::from_bytes(&json),
+                MdCancel::none(),
+                done,
+            );
+        };
+        drop(json);
+        from_json(&fut.await?)
+    }
+}
+
+#[async_trait]
+impl RemoteNode for FfiRemoteNode {
+    async fn echo(&self, peer: &Peer) -> Result<()> {
+        self.call(&RemoteRequest::Echo { peer: peer.clone() }).await
+    }
+
+    async fn send(
+        &self,
+        job: uuid::Uuid,
+        peer: &Peer,
+        instances: &[SopInstanceUid],
+    ) -> Result<SendOutcome> {
+        self.call(&RemoteRequest::Send {
+            job,
+            peer: peer.clone(),
+            instances: instances.to_vec(),
+        })
+        .await
+    }
+}
+
+impl Drop for FfiRemoteNode {
+    fn drop(&mut self) {
+        tracing::debug!(addon = %self.addon, "destroying remote node");
         // SAFETY: as for `FfiBlobStore`.
         unsafe { (self.vtable.destroy)(self.instance) };
     }

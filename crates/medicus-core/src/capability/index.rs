@@ -1,4 +1,5 @@
-//! The index: hierarchy, query keys, blob locations, the event outbox and subscriber cursors.
+//! The index: hierarchy, query keys, blob locations, the event outbox, subscriber cursors and
+//! jobs.
 //!
 //! The index is the single source of truth for what is stored. Everything that changes data also
 //! appends the corresponding event in the same transaction (PLAN §3.7), so subscribers never miss
@@ -10,6 +11,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::BlobKey;
+use crate::capability::job::{Job, JobState};
 use crate::error::Result;
 use crate::event::Event;
 use crate::query::Query;
@@ -209,6 +211,19 @@ pub trait IndexStore: Send + Sync + 'static {
 
     /// Marks a backfilled extra tag as `Ready`.
     async fn mark_extra_ready(&self, tag: crate::Tag) -> Result<()>;
+
+    /// Inserts or replaces a job.
+    async fn put_job(&self, job: &Job) -> Result<()>;
+
+    async fn get_job(&self, id: uuid::Uuid) -> Result<Option<Job>>;
+
+    /// Jobs, newest first; only those in `state` if given.
+    async fn list_jobs(&self, state: Option<JobState>, limit: u32, offset: u64)
+    -> Result<Vec<Job>>;
+
+    /// Atomically takes the oldest queued job that is due at `now`: marks it `Running` and
+    /// counts the attempt. Concurrent callers never get the same job.
+    async fn claim_job(&self, now: time::OffsetDateTime) -> Result<Option<Job>>;
 }
 
 /// Wire format of `IndexStore` calls over the ABI (one JSON request per call).
@@ -260,6 +275,23 @@ pub enum IndexRequest {
         #[serde(with = "crate::tag::serde_tag")]
         tag: crate::Tag,
     },
+    PutJob {
+        job: Box<Job>,
+    },
+    GetJob {
+        id: uuid::Uuid,
+    },
+    ListJobs {
+        #[serde(default)]
+        state: Option<JobState>,
+        limit: u32,
+        #[serde(default)]
+        offset: u64,
+    },
+    ClaimJob {
+        #[serde(with = "time::serde::rfc3339")]
+        now: time::OffsetDateTime,
+    },
 }
 
 impl IndexRequest {
@@ -280,6 +312,10 @@ impl IndexRequest {
         "configure_extra_tags",
         "update_extra",
         "mark_extra_ready",
+        "put_job",
+        "get_job",
+        "list_jobs",
+        "claim_job",
     ];
 }
 

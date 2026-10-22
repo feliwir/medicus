@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
-use medicus_core::capability::{BlobStore, EventHook, IndexStore, Service};
+use medicus_core::capability::{BlobStore, EventHook, IndexStore, RemoteNode, Service};
 use medicus_host::{AddonInfo, AddonLoader, LoadedAddon, StaticAddon};
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
@@ -35,6 +35,8 @@ pub(crate) struct Capabilities {
     pub(crate) event_hooks: BTreeMap<String, Arc<dyn EventHook>>,
     /// Background services, keyed `<addon>/<service>`.
     pub(crate) services: BTreeMap<String, Arc<dyn Service>>,
+    /// Protocol clients for peers, keyed by protocol.
+    pub(crate) remote_nodes: BTreeMap<String, Arc<dyn RemoteNode>>,
     pub(crate) addons: Vec<AddonInfo>,
     /// The loader, to bind the host services once the archive exists.
     pub(crate) loader: Option<AddonLoader>,
@@ -50,6 +52,10 @@ impl std::fmt::Debug for Capabilities {
             .field("blob_stores", &self.blob_stores.keys().collect::<Vec<_>>())
             .field("event_hooks", &self.event_hooks.keys().collect::<Vec<_>>())
             .field("services", &self.services.keys().collect::<Vec<_>>())
+            .field(
+                "remote_nodes",
+                &self.remote_nodes.keys().collect::<Vec<_>>(),
+            )
             .field("addons", &self.addons)
             .finish_non_exhaustive()
     }
@@ -80,6 +86,14 @@ impl Capabilities {
         }
         for c in addon.services {
             self.services.insert(format!("{name}/{}", c.name), c.value);
+        }
+        for c in addon.remote_nodes {
+            if self.remote_nodes.insert(c.name.clone(), c.value).is_some() {
+                bail!(
+                    "protocol {:?} has two remote node clients (second from {name})",
+                    c.name
+                );
+            }
         }
         self.addons.push(addon.info);
         Ok(())

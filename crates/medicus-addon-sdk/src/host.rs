@@ -3,7 +3,7 @@
 use medicus_abi::bridge::{completion, export_stream, stream_completion};
 use medicus_abi::ffi::{MdCancel, MdStr};
 use medicus_core::capability::index::{InstanceLocation, QueryResult, ResourceUid};
-use medicus_core::capability::{ByteStream, HostServices, Ingested, Peer};
+use medicus_core::capability::{ByteStream, HostServices, Ingested, JobProgress, Peer};
 use medicus_core::event::Origin;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -102,5 +102,13 @@ impl HostServices for Host {
 
     async fn peers(&self) -> Result<Vec<Peer>> {
         self.call("peers", &()).await
+    }
+
+    async fn job_progress(&self, job: uuid::Uuid, progress: JobProgress) -> Result<bool> {
+        self.call(
+            "job_progress",
+            &serde_json::json!({ "job": job, "progress": progress }),
+        )
+        .await
     }
 }

@@ -47,6 +47,8 @@ tokio = { workspace = true, features = ["fs", "net"] }
 tokio-util = { version = "0.7", features = ["io", "rt"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
+time.workspace = true
+uuid.workspace = true
 
 [dev-dependencies]
 http-body-util = "0.1"

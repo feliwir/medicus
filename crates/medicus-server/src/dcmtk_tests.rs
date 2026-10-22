@@ -56,6 +56,8 @@ async fn node_with_peers(
     peers: impl IntoIterator<Item = (&'static str, u16)>,
 ) -> Node {
     let mut cfg = Config::default();
+    // One attempt per job, so a job to an unreachable peer fails right away.
+    cfg.jobs.max_attempts = 1;
     for (ae, peer_port) in peers {
         cfg.peers.insert(
             ae.to_lowercase(),
@@ -631,5 +633,94 @@ async fn movescu_and_getscu_retrieve() {
     let (ok, log) = tool_log(&bin, "getscu", list).await;
     assert!(ok, "{log}");
     assert_eq!(received(&got_dir), ["1.9.2.2.1", "1.9.2.2.2"]);
+    node.stop_services().await;
+}
+
+async fn wait_for_job(
+    node: &Node,
+    id: uuid::Uuid,
+    state: medicus_core::capability::JobState,
+) -> medicus_core::capability::Job {
+    for _ in 0..500 {
+        let job = node.jobs.get(id).await.unwrap();
+        if job.state == state {
+            return job;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    panic!(
+        "job {id} never reached {state:?}: {:?}",
+        node.jobs.get(id).await.unwrap()
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn send_jobs_to_storescp() {
+    use medicus_core::capability::index::ResourceUid;
+    use medicus_core::capability::{JobKind, JobState};
+    let Some(bin) = dcmtk_bin() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let (port, dest_port, down_port) = (free_port(), free_port(), free_port());
+    let node = node_with_peers(
+        &dir.path().join("data"),
+        port,
+        json!({}),
+        [("DEST", dest_port), ("DOWN", down_port)],
+    )
+    .await;
+    ingest_patients(&node).await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let runner = tokio::spawn(node.jobs.clone().run(stop.clone()));
+
+    let received_dir = dir.path().join("sent");
+    std::fs::create_dir(&received_dir).unwrap();
+    let _scp = StoreScp::start(&bin, "DEST", dest_port, &received_dir);
+    node.jobs.echo("dest").await.unwrap();
+    assert_eq!(
+        node.jobs.echo("down").await.unwrap_err().kind,
+        medicus_core::ErrorKind::Unavailable
+    );
+
+    let study = |uid: &str| ResourceUid::Study(uid.parse().unwrap());
+    let job = node
+        .jobs
+        .submit(JobKind::Send {
+            peer: "dest".into(),
+            resources: vec![study("1.9.2"), study("1.9.1")],
+        })
+        .await
+        .unwrap();
+    let done = wait_for_job(&node, job.id, JobState::Succeeded).await;
+    assert_eq!(done.progress.completed, 4);
+    assert_eq!(done.progress.failed, 0);
+    assert_eq!(
+        received(&received_dir),
+        ["1.9.1.1.1", "1.9.2.1.1", "1.9.2.2.1", "1.9.2.2.2"]
+    );
+
+    let failing = node
+        .jobs
+        .submit(JobKind::Send {
+            peer: "down".into(),
+            resources: vec![study("1.9.1")],
+        })
+        .await
+        .unwrap();
+    let failed = wait_for_job(&node, failing.id, JobState::Failed).await;
+    assert!(failed.error.is_some());
+    let kinds: Vec<_> = node
+        .archive
+        .index
+        .events_after(0, 1000)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|e| e.kind)
+        .collect();
+    assert!(kinds.contains(&EventKind::PeerUnreachable));
+    assert!(kinds.contains(&EventKind::JobFailed));
+    assert!(kinds.contains(&EventKind::JobFinished));
+    stop.cancel();
+    runner.await.unwrap();
     node.stop_services().await;
 }
