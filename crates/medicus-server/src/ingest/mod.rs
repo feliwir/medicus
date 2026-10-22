@@ -89,6 +89,7 @@ impl Archive {
 
     /// Ingests one DICOM Part 10 file.
     pub(crate) async fn ingest(&self, mut data: ByteStream, origin: Origin) -> Result<Stored> {
+        self.ensure_capacity()?;
         let (prefix, parsed) = self.read_header(&mut data).await?;
 
         // Stream the complete file: the buffered prefix, then the rest as it arrives.

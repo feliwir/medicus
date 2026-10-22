@@ -3,6 +3,7 @@
 mod addons;
 mod api;
 mod archive;
+mod capacity;
 mod config;
 mod events;
 mod import;
@@ -99,6 +100,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
 
     let shutdown = tokio_util::sync::CancellationToken::new();
     let mut deliveries = events::spawn(&archive, caps.event_hooks.clone(), &shutdown);
+    let capacity = tokio::spawn(capacity::monitor(archive.clone(), shutdown.clone()));
 
     let state = api::AppState {
         archive,
@@ -122,6 +124,7 @@ async fn run(cfg: Config) -> anyhow::Result<()> {
     tracing::info!("shutting down");
     shutdown.cancel();
     while deliveries.join_next().await.is_some() {}
+    let _ = capacity.await;
     Ok(())
 }
 

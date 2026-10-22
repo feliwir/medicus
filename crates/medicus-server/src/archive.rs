@@ -15,7 +15,7 @@ use medicus_core::{Error, Result};
 use tokio::sync::watch;
 
 use crate::addons::Capabilities;
-use crate::config::ArchiveConfig;
+use crate::config::{ArchiveConfig, CapacityConfig};
 
 pub(crate) struct Archive {
     pub(crate) index: Arc<dyn IndexStore>,
@@ -26,6 +26,9 @@ pub(crate) struct Archive {
     pub(crate) extra_tags: Arc<[ExtraTag]>,
     /// The highest event sequence number committed so far; subscribers wait on changes.
     last_seq: watch::Sender<u64>,
+    pub(crate) capacity: CapacityConfig,
+    /// Set while the default store is critically full; ingest is refused meanwhile.
+    pub(crate) storage_full: std::sync::atomic::AtomicBool,
 }
 
 impl std::fmt::Debug for Archive {
@@ -85,6 +88,8 @@ impl Archive {
             max_header_bytes: cfg.max_header_bytes,
             extra_tags: extra_tags.into(),
             last_seq: watch::Sender::new(last),
+            capacity: cfg.capacity.clone(),
+            storage_full: std::sync::atomic::AtomicBool::new(false),
         })
     }
 

@@ -36,6 +36,34 @@ pub(crate) struct ArchiveConfig {
     pub(crate) max_header_bytes: usize,
     /// Attributes indexed in addition to the standard query keys.
     pub(crate) extra_tags: Vec<ExtraTagConfig>,
+    /// When ingest is refused because storage is (nearly) full.
+    pub(crate) capacity: CapacityConfig,
+}
+
+/// The critical-capacity guard (PLAN §3.10). It works without any eviction policy: when the
+/// default store reaches `critical_percent`, new instances are refused until usage drops below
+/// `resume_percent`. Retrieval is never affected.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub(crate) struct CapacityConfig {
+    pub(crate) critical_percent: f64,
+    pub(crate) resume_percent: f64,
+    /// Optional quota for the default store; usage is then also measured against it, using the
+    /// bytes referenced by the index. Required for stores without a physical limit (S3).
+    pub(crate) quota_bytes: Option<u64>,
+    /// Seconds between two capacity checks.
+    pub(crate) check_interval_secs: u64,
+}
+
+impl Default for CapacityConfig {
+    fn default() -> Self {
+        Self {
+            critical_percent: 95.0,
+            resume_percent: 85.0,
+            quota_bytes: None,
+            check_interval_secs: 10,
+        }
+    }
 }
 
 impl Default for ArchiveConfig {
@@ -46,6 +74,7 @@ impl Default for ArchiveConfig {
             duplicate_policy: DuplicatePolicy::Overwrite,
             max_header_bytes: 64 * 1024 * 1024,
             extra_tags: Vec::new(),
+            capacity: CapacityConfig::default(),
         }
     }
 }
