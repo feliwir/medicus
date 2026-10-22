@@ -1,21 +1,17 @@
 //! The admin HTTP API (`/api/v1`, PLAN §3.6) and health endpoints.
 
 use std::convert::Infallible;
-use std::net::SocketAddr;
 use std::sync::Arc;
 
-use axum::body::Body;
-use axum::extract::{ConnectInfo, DefaultBodyLimit, Path, Query, State};
-use axum::http::{HeaderMap, StatusCode, header};
+use axum::extract::{Path, Query, State};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{delete, get, post};
+use axum::routing::{get, post};
 use axum::{Json, Router};
-use futures::{Stream, TryStreamExt as _};
-use medicus_core::capability::index::ResourceUid;
-use medicus_core::capability::{Job, JobKind, JobState, Peer};
-use medicus_core::event::{Event, EventKind, Origin};
-use medicus_core::uid::{SeriesInstanceUid, SopInstanceUid, StudyInstanceUid};
+use futures::Stream;
+use medicus_core::capability::{Job, JobState, Peer};
+use medicus_core::event::{Event, EventKind};
 use medicus_core::{Error, ErrorKind};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -34,18 +30,10 @@ pub(crate) struct AppState {
 pub(crate) fn router(state: AppState) -> Router {
     let v1 = Router::new()
         .route("/system", get(system))
-        .route(
-            "/instances",
-            post(upload).layer(DefaultBodyLimit::disable()),
-        )
-        .route("/instances/{uid}", get(download).delete(delete_instance))
-        .route("/series/{uid}", delete(delete_series))
-        .route("/studies/{uid}", delete(delete_study))
         .route("/events", get(list_events))
         .route("/events/stream", get(stream_events))
         .route("/peers", get(list_peers))
         .route("/peers/{name}/echo", post(echo_peer))
-        .route("/peers/{name}/send", post(send_to_peer))
         .route("/jobs", get(list_jobs))
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/cancel", post(cancel_job));
@@ -68,13 +56,6 @@ async fn echo_peer(State(s): State<AppState>, Path(name): Path<String>) -> ApiRe
     Ok(StatusCode::NO_CONTENT)
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SendRequest {
-    /// `[{"level": "study" | "series" | "instance", "uid": ...}, ...]`
-    resources: Vec<ResourceUid>,
-}
-
 /// A job as returned by the API, with its id also as a DICOM UID.
 #[derive(Debug, Serialize)]
 struct JobView {
@@ -90,21 +71,6 @@ impl From<Job> for JobView {
             job,
         }
     }
-}
-
-async fn send_to_peer(
-    State(s): State<AppState>,
-    Path(name): Path<String>,
-    Json(request): Json<SendRequest>,
-) -> ApiResult<(StatusCode, Json<JobView>)> {
-    let job = s
-        .jobs
-        .submit(JobKind::Send {
-            peer: name,
-            resources: request.resources,
-        })
-        .await?;
-    Ok((StatusCode::ACCEPTED, Json(job.into())))
 }
 
 #[derive(Debug, Deserialize)]
@@ -170,17 +136,6 @@ impl IntoResponse for ApiError {
 
 type ApiResult<T> = Result<T, ApiError>;
 
-fn origin(addr: SocketAddr) -> Origin {
-    Origin::AdminApi {
-        remote_addr: addr.to_string(),
-        principal: None,
-    }
-}
-
-fn bad_uid(e: impl std::fmt::Display) -> ApiError {
-    ApiError(Error::invalid_argument(e.to_string()))
-}
-
 async fn ready(State(s): State<AppState>) -> StatusCode {
     match s.archive.index.last_event_seq().await {
         Ok(_) => StatusCode::OK,
@@ -207,82 +162,6 @@ fn medicus_abi_version() -> String {
     format!("{}.{}", v >> 16, v & 0xFFFF)
 }
 
-/// `POST /api/v1/instances` with a DICOM Part 10 file as body (streamed).
-async fn upload(
-    State(s): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    body: Body,
-) -> ApiResult<(StatusCode, Json<medicus_core::capability::Ingested>)> {
-    let data = body.into_data_stream().map_err(|e| {
-        Error::new(
-            ErrorKind::InvalidArgument,
-            format!("reading request body: {e}"),
-        )
-    });
-    let stored = s.archive.ingest(Box::pin(data), origin(addr)).await?;
-    Ok((StatusCode::CREATED, Json(stored)))
-}
-
-/// `GET /api/v1/instances/{uid}`: the stored Part 10 file.
-async fn download(State(s): State<AppState>, Path(uid): Path<String>) -> ApiResult<Response> {
-    let uid = SopInstanceUid::parse(&uid).map_err(bad_uid)?;
-    let (location, data) = s.archive.retrieve(&uid).await?;
-    let body = Body::from_stream(data.map_err(|e| std::io::Error::other(e.to_string())));
-    Ok((
-        [
-            (header::CONTENT_TYPE, "application/dicom".to_owned()),
-            (header::CONTENT_LENGTH, location.size.to_string()),
-        ],
-        body,
-    )
-        .into_response())
-}
-
-#[derive(Debug, Serialize)]
-struct Deleted {
-    seq: u64,
-    instances: usize,
-}
-
-async fn delete_resource(
-    s: &AppState,
-    addr: SocketAddr,
-    resource: ResourceUid,
-) -> ApiResult<Json<Deleted>> {
-    let out = s.archive.delete(&resource, origin(addr)).await?;
-    Ok(Json(Deleted {
-        seq: out.seq,
-        instances: out.removed.len(),
-    }))
-}
-
-async fn delete_instance(
-    State(s): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Path(uid): Path<String>,
-) -> ApiResult<Json<Deleted>> {
-    let uid = SopInstanceUid::parse(&uid).map_err(bad_uid)?;
-    delete_resource(&s, addr, ResourceUid::Instance(uid)).await
-}
-
-async fn delete_series(
-    State(s): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Path(uid): Path<String>,
-) -> ApiResult<Json<Deleted>> {
-    let uid = SeriesInstanceUid::parse(&uid).map_err(bad_uid)?;
-    delete_resource(&s, addr, ResourceUid::Series(uid)).await
-}
-
-async fn delete_study(
-    State(s): State<AppState>,
-    ConnectInfo(addr): ConnectInfo<SocketAddr>,
-    Path(uid): Path<String>,
-) -> ApiResult<Json<Deleted>> {
-    let uid = StudyInstanceUid::parse(&uid).map_err(bad_uid)?;
-    delete_resource(&s, addr, ResourceUid::Study(uid)).await
-}
-
 #[derive(Debug, Deserialize)]
 struct EventsQuery {
     /// Return events with `seq > since`.
@@ -305,8 +184,9 @@ impl EventsQuery {
             .split(',')
             .filter(|k| !k.is_empty())
             .map(|k| {
-                k.parse()
-                    .map_err(|e: medicus_core::event::EventKindError| bad_uid(e))
+                k.parse().map_err(|e: medicus_core::event::EventKindError| {
+                    ApiError(Error::invalid_argument(e.to_string()))
+                })
             })
             .collect()
     }
@@ -387,9 +267,12 @@ async fn stream_events(
 mod tests {
     use super::*;
     use crate::config::Config;
-    use axum::http::Request;
+    use axum::body::Body;
+    use axum::http::{Request, header};
     use futures::StreamExt as _;
     use http_body_util::BodyExt as _;
+    use medicus_core::capability::JobKind;
+    use medicus_core::event::Origin;
     use medicus_testkit::dicom::InstanceBuilder;
     use tower::ServiceExt as _;
 
@@ -413,15 +296,24 @@ mod tests {
         (router(state), archive)
     }
 
-    fn request(method: &str, uri: &str, body: Body) -> Request<Body> {
-        let mut r = Request::builder()
+    /// Stores an instance the way a protocol front-end would.
+    async fn ingest(archive: &Archive, sop: &str) {
+        let file = InstanceBuilder::new("1.2.3", "1.2.3.1", sop).build();
+        let origin = Origin::Internal {
+            component: "test".into(),
+        };
+        archive
+            .ingest(medicus_testkit::stream(&file, 4096), origin)
+            .await
+            .unwrap();
+    }
+
+    fn request(method: &str, uri: &str) -> Request<Body> {
+        Request::builder()
             .method(method)
             .uri(uri)
-            .body(body)
-            .unwrap();
-        r.extensions_mut()
-            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 4242))));
-        r
+            .body(Body::empty())
+            .unwrap()
     }
 
     async fn send(app: &Router, req: Request<Body>) -> (StatusCode, Vec<u8>) {
@@ -442,128 +334,64 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn upload_download_events_delete() {
+    async fn health_system_and_events() {
         let dir = tempfile::tempdir().unwrap();
-        let (app, _archive) = app(dir.path()).await;
+        let (app, archive) = app(dir.path()).await;
         assert_eq!(
-            send(&app, request("GET", "/health/ready", Body::empty()))
-                .await
-                .0,
+            send(&app, request("GET", "/health/ready")).await.0,
             StatusCode::OK
         );
-
-        // A 3 MiB upload: well above axum's default body limit.
-        let file = InstanceBuilder::new("1.2.3", "1.2.3.1", "1.2.3.1.1")
-            .pixel_data(3 << 20)
-            .build();
-        let (status, body) = send(
-            &app,
-            request("POST", "/api/v1/instances", Body::from(file.clone())),
-        )
-        .await;
-        assert_eq!(
-            status,
-            StatusCode::CREATED,
-            "{}",
-            String::from_utf8_lossy(&body)
-        );
-        let stored = json_of(&body);
-        assert_eq!(stored["instance"], "1.2.3.1.1");
-        assert_eq!(stored["duplicate"], "none");
-
-        let (status, body) = send(
-            &app,
-            request("GET", "/api/v1/instances/1.2.3.1.1", Body::empty()),
-        )
-        .await;
+        let (status, body) = send(&app, request("GET", "/api/v1/system")).await;
         assert_eq!(status, StatusCode::OK);
-        assert_eq!(body, file);
+        assert_eq!(json_of(&body)["storage"], "local");
 
-        let (status, body) = send(
-            &app,
-            request("GET", "/api/v1/events?since=0", Body::empty()),
-        )
-        .await;
+        ingest(&archive, "1.2.3.1.1").await;
+        let (status, body) = send(&app, request("GET", "/api/v1/events?since=0")).await;
         assert_eq!(status, StatusCode::OK);
         let page = json_of(&body);
         assert_eq!(page["events"][0]["kind"], "instance.stored");
-        assert_eq!(page["events"][0]["origin"]["type"], "admin_api");
-        assert_eq!(page["events"][0]["origin"]["remote_addr"], "127.0.0.1:4242");
         assert_eq!(page["next"], 1);
-
-        let (status, body) = send(
-            &app,
-            request("DELETE", "/api/v1/studies/1.2.3", Body::empty()),
-        )
-        .await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json_of(&body)["instances"], 1);
         let (_, body) = send(
             &app,
-            request(
-                "GET",
-                "/api/v1/events?since=1&kind=study.deleted",
-                Body::empty(),
-            ),
+            request("GET", "/api/v1/events?since=0&kind=study.deleted"),
         )
         .await;
-        assert_eq!(json_of(&body)["events"][0]["kind"], "study.deleted");
+        assert_eq!(json_of(&body)["events"], json!([]));
+        assert_eq!(
+            send(&app, request("GET", "/api/v1/events?kind=Bad"))
+                .await
+                .0,
+            StatusCode::BAD_REQUEST
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn errors_map_to_status_codes() {
+    async fn no_data_endpoints() {
+        // Data goes in and out through DIMSE and DICOMweb only.
         let dir = tempfile::tempdir().unwrap();
-        let (app, _) = app(dir.path()).await;
-        let (status, body) = send(
-            &app,
-            request("POST", "/api/v1/instances", Body::from("not dicom")),
-        )
-        .await;
-        assert_eq!(status, StatusCode::BAD_REQUEST);
-        assert_eq!(json_of(&body)["error"], "invalid argument");
-        assert_eq!(
-            send(
-                &app,
-                request("GET", "/api/v1/instances/9.9.9", Body::empty())
-            )
-            .await
-            .0,
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            send(
-                &app,
-                request("GET", "/api/v1/instances/not-a-uid", Body::empty())
-            )
-            .await
-            .0,
-            StatusCode::BAD_REQUEST
-        );
-        assert_eq!(
-            send(&app, request("DELETE", "/api/v1/series/9.9", Body::empty()))
-                .await
-                .0,
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            send(
-                &app,
-                request("GET", "/api/v1/events?kind=Bad", Body::empty())
-            )
-            .await
-            .0,
-            StatusCode::BAD_REQUEST
-        );
+        let (app, archive) = app(dir.path()).await;
+        ingest(&archive, "1.2.3.1.1").await;
+        for (method, uri) in [
+            ("POST", "/api/v1/instances"),
+            ("GET", "/api/v1/instances/1.2.3.1.1"),
+            ("DELETE", "/api/v1/studies/1.2.3"),
+            ("POST", "/api/v1/peers/p/send"),
+        ] {
+            let status = send(&app, request(method, uri)).await.0;
+            assert!(
+                status == StatusCode::NOT_FOUND || status == StatusCode::METHOD_NOT_ALLOWED,
+                "{method} {uri}: {status}"
+            );
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn event_stream_replays_then_goes_live() {
         let dir = tempfile::tempdir().unwrap();
         let (app, archive) = app(dir.path()).await;
-        let file = InstanceBuilder::new("1.2.3", "1.2.3.1", "1.2.3.1.1").build();
-        send(&app, request("POST", "/api/v1/instances", Body::from(file))).await;
+        ingest(&archive, "1.2.3.1.1").await;
 
-        let mut req = request("GET", "/api/v1/events/stream", Body::empty());
+        let mut req = request("GET", "/api/v1/events/stream");
         req.headers_mut()
             .insert("last-event-id", "0".parse().unwrap());
         let resp = app.clone().oneshot(req).await.unwrap();
@@ -576,16 +404,7 @@ mod tests {
         );
 
         // A change committed after the stream started is delivered live.
-        let second_file = InstanceBuilder::new("1.2.3", "1.2.3.1", "1.2.3.1.2").build();
-        archive
-            .ingest(
-                medicus_testkit::stream(&second_file, 4096),
-                Origin::Internal {
-                    component: "t".into(),
-                },
-            )
-            .await
-            .unwrap();
+        ingest(&archive, "1.2.3.1.2").await;
         let next = tokio::time::timeout(std::time::Duration::from_secs(5), body.next())
             .await
             .unwrap()
@@ -599,36 +418,29 @@ mod tests {
     async fn peers_and_jobs_endpoints() {
         let dir = tempfile::tempdir().unwrap();
         let (app, _) = app(dir.path()).await;
-        let (status, body) = send(&app, request("GET", "/api/v1/peers", Body::empty())).await;
+        let (status, body) = send(&app, request("GET", "/api/v1/peers")).await;
         assert_eq!(status, StatusCode::OK);
         assert_eq!(json_of(&body), json!([]));
-        let send_body = json!({ "resources": [{ "level": "study", "uid": "1.2.3" }] }).to_string();
-        let mut req = request("POST", "/api/v1/peers/nowhere/send", Body::from(send_body));
-        req.headers_mut()
-            .insert(header::CONTENT_TYPE, "application/json".parse().unwrap());
-        assert_eq!(send(&app, req).await.0, StatusCode::NOT_FOUND);
-        let (status, body) = send(&app, request("GET", "/api/v1/jobs", Body::empty())).await;
-        assert_eq!(status, StatusCode::OK);
-        assert_eq!(json_of(&body), json!([]));
-        let missing = format!(
-            "/api/v1/jobs/{}",
-            Job::new(
-                JobKind::Send {
-                    peer: "p".into(),
-                    resources: vec![]
-                },
-                1
-            )
-            .transaction_uid()
-        );
         assert_eq!(
-            send(&app, request("GET", &missing, Body::empty())).await.0,
+            send(&app, request("POST", "/api/v1/peers/nowhere/echo"))
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+        let (status, body) = send(&app, request("GET", "/api/v1/jobs")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(json_of(&body), json!([]));
+        let kind = JobKind::Send {
+            peer: "p".into(),
+            resources: vec![],
+        };
+        let missing = format!("/api/v1/jobs/{}", Job::new(kind, 1).transaction_uid());
+        assert_eq!(
+            send(&app, request("GET", &missing)).await.0,
             StatusCode::NOT_FOUND
         );
         assert_eq!(
-            send(&app, request("GET", "/api/v1/jobs/nonsense", Body::empty()))
-                .await
-                .0,
+            send(&app, request("GET", "/api/v1/jobs/nonsense")).await.0,
             StatusCode::BAD_REQUEST
         );
     }

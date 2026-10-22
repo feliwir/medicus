@@ -7,8 +7,9 @@ is a breaking change.
 
 - Added `MD_CAP_REMOTE_NODE` with `MdRemoteNodeVtable`: protocol clients for peers, registered
   under the protocol name. A single JSON `call` serves `echo` and `send` (send jobs).
-- Added the host method `job_progress` (via `MdHostApi::call`): executors report progress and
-  learn when a job was cancelled.
+- Added the host methods `job_progress` (via `MdHostApi::call`), with which executors report
+  progress and learn when a job was cancelled, and `submit_job`, with which protocol front-ends
+  queue jobs (e.g. a `DICOMweb` send).
 - Index stores gained the methods `put_job`, `get_job`, `list_jobs` and `claim_job`.
 
 ## 0.4

@@ -259,6 +259,14 @@ impl<H: Handler> Session<H> {
         );
         let mut scu = match StoreScu::connect(&options, instances).await {
             Ok(scu) => scu,
+            Err(e) if e.is_no_accepted_contexts() => {
+                let failure = Status::new(Status::SOP_CLASS_NOT_SUPPORTED)
+                    .with_comment("the destination accepts none of the instances as stored");
+                for instance in instances {
+                    progress.record(instance, &failure);
+                }
+                return Ok(Outcome::Done);
+            }
             Err(e) => {
                 tracing::warn!(association = %self.info.id, destination = %destination.ae_title, error = %e, "cannot connect to the C-MOVE destination");
                 return Ok(Outcome::Refused(

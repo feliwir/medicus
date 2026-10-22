@@ -12,7 +12,7 @@ use medicus_abi::ffi::{
     MdReadStream, MdStatus, MdStr, MdStreamCompletion,
 };
 use medicus_core::capability::index::ResourceUid;
-use medicus_core::capability::{HostServices, JobProgress};
+use medicus_core::capability::{HostServices, JobKind, JobProgress};
 use medicus_core::event::Origin;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -217,6 +217,7 @@ enum Call {
     Locate(ResourceUid),
     Peers,
     JobProgress(JobProgressRequest),
+    SubmitJob(JobKind),
 }
 
 #[derive(serde::Deserialize)]
@@ -232,6 +233,7 @@ impl Call {
             b"locate" => parse("resource", request).map(Self::Locate),
             b"peers" => Ok(Self::Peers),
             b"job_progress" => parse("job progress", request).map(Self::JobProgress),
+            b"submit_job" => parse("job", request).map(Self::SubmitJob),
             other => Err(Error::unsupported(format!(
                 "unknown host method {:?}",
                 String::from_utf8_lossy(other)
@@ -245,6 +247,7 @@ impl Call {
             Self::Locate(r) => to_buffer(&services.locate(&r).await?),
             Self::Peers => to_buffer(&services.peers().await?),
             Self::JobProgress(r) => to_buffer(&services.job_progress(r.job, r.progress).await?),
+            Self::SubmitJob(kind) => to_buffer(&services.submit_job(kind).await?),
         }
     }
 }

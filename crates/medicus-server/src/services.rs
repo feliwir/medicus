@@ -4,7 +4,9 @@ use std::sync::Arc;
 
 use medicus_core::Result;
 use medicus_core::capability::index::{InstanceLocation, QueryResult, ResourceUid};
-use medicus_core::capability::{ByteStream, HostServices, Ingested, JobProgress, Peer};
+use medicus_core::capability::{
+    ByteStream, HostServices, Ingested, Job, JobKind, JobProgress, Peer,
+};
 use medicus_core::event::Origin;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -39,6 +41,10 @@ impl HostServices for NodeServices {
 
     async fn peers(&self) -> Result<Vec<Peer>> {
         Ok(self.jobs.peers().cloned().collect())
+    }
+
+    async fn submit_job(&self, kind: JobKind) -> Result<Job> {
+        self.jobs.submit(kind).await
     }
 
     async fn job_progress(&self, job: Uuid, progress: JobProgress) -> Result<bool> {

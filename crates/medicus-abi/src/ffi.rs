@@ -155,7 +155,8 @@ pub struct MdHostApi {
     /// Calls a host service with a JSON request; the result is the JSON response (ABI 0.4).
     /// Methods: `query` (a query AST → one page of results), `locate` (a study, series or
     /// instance → its stored instances), `peers` (`null` → the configured peers), `job_progress`
-    /// (`{"job", "progress"}` → `true`, or `false` once the job was cancelled). Unknown
+    /// (`{"job", "progress"}` → `true`, or `false` once the job was cancelled), `submit_job` (a job
+    /// kind → the queued job). Unknown
     /// methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
     /// ready.
     pub call: unsafe extern "C" fn(

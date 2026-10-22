@@ -34,6 +34,17 @@ pub enum Error {
     Source(medicus_core::Error),
 }
 
+impl Error {
+    /// The peer was reached but accepted none of the proposed presentation contexts.
+    pub fn is_no_accepted_contexts(&self) -> bool {
+        matches!(
+            self,
+            Self::Association(e)
+                if matches!(**e, dicom_ul::association::Error::NoAcceptedPresentationContexts { .. })
+        )
+    }
+}
+
 impl From<dicom_ul::association::Error> for Error {
     fn from(e: dicom_ul::association::Error) -> Self {
         Self::Association(Box::new(e))

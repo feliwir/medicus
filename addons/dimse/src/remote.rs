@@ -110,6 +110,12 @@ impl RemoteNode for Dimse {
         while let Some(batch) = batches.next() {
             let mut scu = match StoreScu::connect(&options, batch.iter().map(|(_, i)| i)).await {
                 Ok(scu) => scu,
+                // The peer answered but takes none of these instances as stored.
+                Err(e) if e.is_no_accepted_contexts() => {
+                    tracing::warn!(peer = %peer.name, "peer accepts none of the batch's SOP classes and transfer syntaxes");
+                    outcome.failed.extend(batch.into_iter().map(|(uid, _)| uid));
+                    continue;
+                }
                 // Nothing sent yet: the peer is unreachable, retry the whole job later.
                 Err(e) if !connected => return Err(unreachable(peer, &e)),
                 Err(e) => {

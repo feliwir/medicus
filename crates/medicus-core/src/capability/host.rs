@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::AeTitle;
 use crate::capability::ByteStream;
 use crate::capability::index::{Duplicate, InstanceLocation, QueryResult, ResourceUid};
-use crate::capability::job::JobProgress;
+use crate::capability::job::{Job, JobKind, JobProgress};
 use crate::error::Result;
 use crate::event::Origin;
 use crate::query::Query;
@@ -72,6 +72,9 @@ pub trait HostServices: Send + Sync + 'static {
 
     /// The configured peers.
     async fn peers(&self) -> Result<Vec<Peer>>;
+
+    /// Queues a job (e.g. a send requested through a protocol front-end).
+    async fn submit_job(&self, kind: JobKind) -> Result<Job>;
 
     /// Reports the progress of a running job; returns `false` once the job was cancelled, after
     /// which the executor should stop.

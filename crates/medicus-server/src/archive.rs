@@ -132,6 +132,8 @@ impl Archive {
     }
 
     /// Deletes a resource from the index (with its event) and then its blobs.
+    // Not reachable through any API yet: deletion will come from eviction (M6b).
+    #[cfg_attr(not(test), expect(dead_code))]
     pub(crate) async fn delete(
         &self,
         resource: &ResourceUid,
