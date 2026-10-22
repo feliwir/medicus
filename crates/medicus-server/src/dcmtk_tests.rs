@@ -46,7 +46,26 @@ fn free_port() -> u16 {
 }
 
 async fn node_with_dimse(data_dir: &Path, port: u16, extra: serde_json::Value) -> Node {
+    node_with_peers(data_dir, port, extra, []).await
+}
+
+async fn node_with_peers(
+    data_dir: &Path,
+    port: u16,
+    extra: serde_json::Value,
+    peers: impl IntoIterator<Item = (&'static str, u16)>,
+) -> Node {
     let mut cfg = Config::default();
+    for (ae, peer_port) in peers {
+        cfg.peers.insert(
+            ae.to_lowercase(),
+            medicus_core::capability::Endpoint::Dimse {
+                ae_title: medicus_core::AeTitle::parse(ae).unwrap(),
+                host: "127.0.0.1".into(),
+                port: peer_port,
+            },
+        );
+    }
     cfg.server.data_dir = data_dir.to_owned();
     let mut config = json!({ "ae_title": "MEDICUS", "listen": format!("127.0.0.1:{port}") });
     if let (Some(config), Some(extra)) = (config.as_object_mut(), extra.as_object()) {
@@ -453,4 +472,164 @@ async fn findscu_fails(bin: &Path, port: u16, keys: &[&str]) -> bool {
     let log = String::from_utf8_lossy(&output.stderr).into_owned()
         + &String::from_utf8_lossy(&output.stdout);
     log.contains("Final Find Response (Error: DataSetDoesNotMatchSOPClass)")
+}
+
+/// A DCMTK storescp writing what it receives (bit-preserving) into `dir`; killed on drop.
+struct StoreScp(std::process::Child);
+
+impl StoreScp {
+    fn start(bin: &Path, ae: &str, port: u16, dir: &Path) -> Self {
+        let child = Command::new(bin.join("storescp"))
+            .args(["-aet", ae, "+xa", "+B", "-od"])
+            .arg(dir)
+            .arg(port.to_string())
+            .spawn()
+            .unwrap();
+        // Wait until it listens.
+        for _ in 0..100 {
+            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        Self(child)
+    }
+}
+
+impl Drop for StoreScp {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+/// SOP Instance UIDs of the files in `dir`, sorted.
+fn received(dir: &Path) -> Vec<String> {
+    let mut uids: Vec<String> = std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| {
+            let obj = dicom_object::open_file(e.unwrap().path()).unwrap();
+            text(&obj, dicom_dictionary_std::tags::SOP_INSTANCE_UID)
+        })
+        .collect();
+    uids.sort();
+    uids
+}
+
+async fn tool_log(bin: &Path, tool: &str, list: Vec<String>) -> (bool, String) {
+    let program = bin.join(tool);
+    let output = tokio::task::spawn_blocking(move || Command::new(program).args(list).output())
+        .await
+        .unwrap()
+        .unwrap();
+    let log = String::from_utf8_lossy(&output.stderr).into_owned()
+        + &String::from_utf8_lossy(&output.stdout);
+    (output.status.success(), log)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn movescu_and_getscu_retrieve() {
+    use dicom_dictionary_std::tags;
+    let Some(bin) = dcmtk_bin() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let (port, dest_port) = (free_port(), free_port());
+    let node = node_with_peers(
+        &dir.path().join("data"),
+        port,
+        json!({}),
+        [("DEST", dest_port)],
+    )
+    .await;
+    ingest_patients(&node).await;
+    let port_arg = port.to_string();
+    let base = |model: &str| {
+        let mut list = args(&["-v", "-aet", "DCMTKSCU", "-aec", "MEDICUS", model]);
+        list.push("-aem".into());
+        list.push("DEST".into());
+        list
+    };
+    let keys = |list: &mut Vec<String>, keys: &[&str]| {
+        for key in keys {
+            list.push("-k".into());
+            list.push((*key).to_owned());
+        }
+        list.extend(["127.0.0.1".to_owned(), port_arg.clone()]);
+    };
+
+    // C-MOVE of a study to storescp.
+    let received_dir = dir.path().join("moved");
+    std::fs::create_dir(&received_dir).unwrap();
+    let scp = StoreScp::start(&bin, "DEST", dest_port, &received_dir);
+    let mut list = base("-S");
+    keys(
+        &mut list,
+        &["QueryRetrieveLevel=STUDY", "StudyInstanceUID=1.9.2"],
+    );
+    let (ok, log) = tool_log(&bin, "movescu", list).await;
+    assert!(ok, "{log}");
+    assert_eq!(
+        received(&received_dir),
+        ["1.9.2.1.1", "1.9.2.2.1", "1.9.2.2.2"]
+    );
+    // The data set arrives as stored.
+    let sop: medicus_core::uid::SopInstanceUid = "1.9.2.2.2".parse().unwrap();
+    let (_, stored) = node.archive.retrieve(&sop).await.unwrap();
+    let stored =
+        dicom_object::from_reader(&medicus_testkit::read_all(stored).await[128..]).unwrap();
+    let moved = std::fs::read_dir(&received_dir)
+        .unwrap()
+        .map(|e| dicom_object::open_file(e.unwrap().path()).unwrap())
+        .find(|obj| text(obj, tags::SOP_INSTANCE_UID) == "1.9.2.2.2")
+        .unwrap();
+    assert_eq!(
+        moved.element(tags::PIXEL_DATA).unwrap().to_bytes().unwrap(),
+        stored
+            .element(tags::PIXEL_DATA)
+            .unwrap()
+            .to_bytes()
+            .unwrap()
+    );
+
+    // Patient root, PATIENT level: all four instances of P1.
+    for entry in std::fs::read_dir(&received_dir).unwrap() {
+        std::fs::remove_file(entry.unwrap().path()).unwrap();
+    }
+    let mut list = base("-P");
+    keys(&mut list, &["QueryRetrieveLevel=PATIENT", "PatientID=P1"]);
+    let (ok, log) = tool_log(&bin, "movescu", list).await;
+    assert!(ok, "{log}");
+    assert_eq!(received(&received_dir).len(), 4);
+    drop(scp);
+
+    // Unknown destination.
+    let mut list = args(&[
+        "-v", "-aet", "DCMTKSCU", "-aec", "MEDICUS", "-S", "-aem", "NOWHERE",
+    ]);
+    keys(
+        &mut list,
+        &["QueryRetrieveLevel=STUDY", "StudyInstanceUID=1.9.2"],
+    );
+    let (_, log) = tool_log(&bin, "movescu", list).await;
+    assert!(
+        log.contains("MoveDestinationUnknown") || log.contains("0xa801"),
+        "{log}"
+    );
+
+    // C-GET of one series onto the same association.
+    let got_dir = dir.path().join("got");
+    std::fs::create_dir(&got_dir).unwrap();
+    let mut list = args(&["-v", "-aet", "DCMTKSCU", "-aec", "MEDICUS", "-S", "-od"]);
+    list.push(got_dir.display().to_string());
+    keys(
+        &mut list,
+        &[
+            "QueryRetrieveLevel=SERIES",
+            "StudyInstanceUID=1.9.2",
+            "SeriesInstanceUID=1.9.2.2",
+        ],
+    );
+    let (ok, log) = tool_log(&bin, "getscu", list).await;
+    assert!(ok, "{log}");
+    assert_eq!(received(&got_dir), ["1.9.2.2.1", "1.9.2.2.2"]);
+    node.stop_services().await;
 }

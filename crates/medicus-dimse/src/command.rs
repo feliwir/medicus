@@ -61,6 +61,12 @@ impl Status {
     pub const OUT_OF_RESOURCES: u16 = 0xA700;
     /// C-STORE: Error: Data Set does not match SOP Class (A9xx).
     pub const DATA_SET_MISMATCH: u16 = 0xA900;
+    /// C-MOVE/C-GET: Refused: Out of resources – Unable to perform sub-operations.
+    pub const UNABLE_TO_PERFORM_SUBOPERATIONS: u16 = 0xA702;
+    /// C-MOVE: Refused: Move Destination unknown.
+    pub const MOVE_DESTINATION_UNKNOWN: u16 = 0xA801;
+    /// C-MOVE/C-GET: Warning: Sub-operations complete – one or more failures or warnings.
+    pub const SUBOPERATIONS_WARNING: u16 = 0xB000;
     /// C-FIND/C-MOVE/C-GET: Identifier does not match SOP Class (A900).
     pub const IDENTIFIER_MISMATCH: u16 = 0xA900;
     /// C-STORE: Error: Cannot understand (Cxxx); C-FIND etc.: Unable to process.
@@ -96,6 +102,11 @@ impl Status {
 
     pub fn is_success(&self) -> bool {
         self.code == Self::SUCCESS
+    }
+
+    /// Warning statuses (PS3.7 C.4): 0001, 0107, 0116 and Bxxx.
+    pub fn is_warning(&self) -> bool {
+        matches!(self.code, 0x0001 | 0x0107 | 0x0116) || self.code & 0xF000 == 0xB000
     }
 }
 
@@ -180,6 +191,11 @@ impl Command {
         ))
     }
 
+    /// The Move Destination (0000,0600) of a C-MOVE-RQ.
+    pub fn move_destination(&self) -> Option<String> {
+        self.text(tags::MOVE_DESTINATION)
+    }
+
     /// Whether a data set follows the command (Command Data Set Type other than `0101H`).
     pub fn has_data_set(&self) -> bool {
         self.u16(tags::COMMAND_DATA_SET_TYPE)
@@ -211,17 +227,44 @@ impl Command {
         ]))
     }
 
-    /// A response to `request` followed by a data set (e.g. a C-FIND match).
-    pub fn pending_response_to(request: &Self, status: &Status) -> Self {
-        let mut response = Self::response_to(request, status);
-        response.0.put(us(tags::COMMAND_DATA_SET_TYPE, 0x0000));
-        // Group length must be recomputed after the change.
+    /// This command with Move Originator Application Entity Title and Message ID (C-STORE
+    /// sub-operations of a C-MOVE).
+    #[must_use]
+    pub fn with_move_originator(self, ae_title: &str, message_id: u16) -> Self {
+        self.with_elements([
+            DataElement::new(
+                tags::MOVE_ORIGINATOR_APPLICATION_ENTITY_TITLE,
+                VR::AE,
+                PrimitiveValue::from(ae_title),
+            ),
+            us(tags::MOVE_ORIGINATOR_MESSAGE_ID, message_id),
+        ])
+    }
+
+    /// This command with `elements` added or replaced, and its group length recomputed.
+    #[must_use]
+    pub fn with_elements(
+        self,
+        elements: impl IntoIterator<Item = dicom_object::mem::InMemElement>,
+    ) -> Self {
+        let mut obj = self.0;
+        for element in elements {
+            obj.put(element);
+        }
         Self(InMemDicomObject::command_from_element_iter(
-            response
-                .0
-                .into_iter()
+            obj.into_iter()
                 .filter(|e| e.header().tag != tags::COMMAND_GROUP_LENGTH),
         ))
+    }
+
+    /// The Error Comment (0000,0902) of a response.
+    pub fn error_comment(&self) -> Option<String> {
+        self.text(tags::ERROR_COMMENT)
+    }
+
+    /// A response to `request` followed by a data set (e.g. a C-FIND match).
+    pub fn pending_response_to(request: &Self, status: &Status) -> Self {
+        Self::response_to(request, status).with_elements([us(tags::COMMAND_DATA_SET_TYPE, 0x0000)])
     }
 
     /// The response to `request`, without a data set.

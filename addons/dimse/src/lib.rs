@@ -1,5 +1,5 @@
-//! `dimse`: the archive's DICOM network services: C-ECHO, C-STORE (ingest) and C-FIND
-//! (Patient Root and Study Root query).
+//! `dimse`: the archive's DICOM network services: C-ECHO, C-STORE (ingest), and C-FIND, C-MOVE
+//! and C-GET in the Patient Root and Study Root models.
 //!
 //! ```toml
 //! [addons.dimse]
@@ -11,6 +11,7 @@
 //! through the host's query service, so they see the same data as every other front-end.
 
 mod find;
+mod retrieve;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -22,7 +23,8 @@ use medicus_core::capability::{ByteStream, HostServices as _, Service};
 use medicus_core::event::Origin;
 use medicus_core::{AeTitle, Error, ErrorKind, Result};
 use medicus_dimse::{
-    AssociationInfo, FindRequest, Handler, Matches, Scp, ScpOptions, Status, StoreRequest,
+    AssociationInfo, Destination, FindRequest, Handler, Instance, Matches, RetrieveRequest, Scp,
+    ScpOptions, Status, StoreRequest,
 };
 use serde::Deserialize;
 use tokio::net::TcpListener;
@@ -97,6 +99,10 @@ impl Config {
         options
             .transfer_syntaxes
             .clone_from(&self.transfer_syntaxes);
+        options.retrieve_sop_classes = retrieve::RETRIEVE_SOP_CLASSES
+            .iter()
+            .map(|c| (*c).to_owned())
+            .collect();
         options.find_sop_classes = find::FIND_SOP_CLASSES
             .iter()
             .map(|c| (*c).to_owned())
@@ -172,6 +178,31 @@ impl Handler for Ingest {
         let find = find::Find::parse(&request.sop_class, &identifier)?;
         tracing::debug!(association = %association.id, level = %find.query.level, keys = find.query.keys.len(), "C-FIND");
         Ok(find.run(self.host, self.ae_title.as_str().to_owned()))
+    }
+
+    async fn retrieve(
+        &self,
+        association: Arc<AssociationInfo>,
+        request: RetrieveRequest,
+        identifier: dicom_object::InMemDicomObject,
+    ) -> Result<Vec<Instance>, Status> {
+        let instances = retrieve::instances(&self.host, &request.sop_class, &identifier).await?;
+        tracing::debug!(association = %association.id, destination = ?request.destination, instances = instances.len(), "retrieve");
+        Ok(instances)
+    }
+
+    async fn open(&self, instance: &Instance) -> Result<ByteStream, Status> {
+        let uid =
+            medicus_core::uid::SopInstanceUid::parse(&instance.sop_instance).map_err(|e| {
+                Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.to_string())
+            })?;
+        self.host.open_instance(&uid).await.map_err(|e| {
+            Status::new(Status::UNABLE_TO_PERFORM_SUBOPERATIONS).with_comment(e.message)
+        })
+    }
+
+    async fn destination(&self, ae_title: &str) -> Option<Destination> {
+        retrieve::destination(&self.host, ae_title).await
     }
 }
 

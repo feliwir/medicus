@@ -2,11 +2,17 @@
 //! the dicom-rs upper layer (`dicom-ul`) and object model (`dicom-object`).
 
 pub mod command;
+mod message;
 pub mod scp;
+pub mod scu;
 pub mod storage;
 
 pub use command::{Command, CommandField, Status};
-pub use scp::{AssociationInfo, FindRequest, Handler, Matches, Scp, ScpOptions, StoreRequest};
+pub use scp::{
+    AssociationInfo, Destination, FindRequest, Handler, Matches, RetrieveRequest, Scp, ScpOptions,
+    StoreRequest,
+};
+pub use scu::{Instance, MoveOriginator, ScuOptions, StoreScu};
 
 /// Implementation Class UID (0002,0012) of files received by medicus.
 pub const IMPLEMENTATION_CLASS_UID: &str = "2.25.21299839958676251082708783506226217531";
@@ -19,8 +25,13 @@ pub enum Error {
     Protocol(String),
     #[error("association error: {0}")]
     Association(#[from] Box<dicom_ul::association::Error>),
+    #[error("association aborted by the peer")]
+    Aborted,
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
+    /// Reading the data to send failed.
+    #[error("{0}")]
+    Source(medicus_core::Error),
 }
 
 impl From<dicom_ul::association::Error> for Error {

@@ -6,7 +6,10 @@
 //! association stops reading from the socket, so TCP flow control slows the sender down.
 //!
 //! C-FIND matches are streamed as pending responses while the association keeps listening, so a
-//! C-CANCEL stops the query.
+//! C-CANCEL stops the query. C-MOVE and C-GET (see [`retrieve`]) send their instances with C-STORE
+//! sub-operations over a new association or the same one.
+
+mod retrieve;
 
 use std::collections::HashSet;
 use std::net::SocketAddr;
@@ -19,11 +22,11 @@ use dicom_encoding::TransferSyntaxIndex as _;
 use dicom_object::{FileMetaTableBuilder, InMemDicomObject};
 use dicom_transfer_syntax_registry::TransferSyntaxRegistry;
 use dicom_ul::Pdu;
-use dicom_ul::association::server::{AccessControl, DefaultNegotiation};
+use dicom_ul::association::server::{AccessControl, Negotiation};
 use dicom_ul::association::{Association as _, AsyncServerAssociation, ServerAssociationOptions};
 use dicom_ul::pdu::{
     AssociationRJServiceUserReason, PDataValue, PDataValueType, PresentationContextResultReason,
-    UserIdentity,
+    RequestorRoles, UserIdentity,
 };
 use futures::StreamExt as _;
 use futures::stream::BoxStream;
@@ -36,7 +39,8 @@ use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
 use crate::command::{Command, CommandField, Status};
-use crate::{Error, IMPLEMENTATION_CLASS_UID, IMPLEMENTATION_VERSION_NAME};
+use crate::scu::Instance;
+use crate::{Error, IMPLEMENTATION_CLASS_UID, IMPLEMENTATION_VERSION_NAME, message};
 
 /// P-DATA fragments buffered between the association and the store handler.
 const STORE_CHANNEL_CAPACITY: usize = 16;
@@ -58,6 +62,8 @@ pub struct ScpOptions {
     pub storage_sop_classes: Vec<String>,
     /// Query/Retrieve information models accepted for C-FIND (e.g. Study Root FIND).
     pub find_sop_classes: Vec<String>,
+    /// Query/Retrieve information models accepted for C-MOVE and C-GET.
+    pub retrieve_sop_classes: Vec<String>,
     /// Accepted transfer syntaxes. Empty (the default) accepts any transfer syntax known to
     /// dicom-rs whose data sets it can read, compressed pixel data included; unknown syntaxes
     /// cannot be accepted, as the archive must parse the header.
@@ -78,6 +84,7 @@ impl ScpOptions {
             allowed_calling: None,
             storage_sop_classes: crate::storage::all().map(str::to_owned).collect(),
             find_sop_classes: Vec::new(),
+            retrieve_sop_classes: Vec::new(),
             transfer_syntaxes: Vec::new(),
             max_pdu_length: 64 * 1024,
             idle_timeout: Some(Duration::from_mins(5)),
@@ -130,6 +137,24 @@ pub struct FindRequest {
     pub sop_class: String,
 }
 
+/// A C-MOVE or C-GET request.
+#[derive(Debug, Clone)]
+pub struct RetrieveRequest {
+    pub message_id: u16,
+    /// The Query/Retrieve information model (Affected SOP Class UID).
+    pub sop_class: String,
+    /// The C-MOVE destination AE title; `None` for C-GET.
+    pub destination: Option<String>,
+}
+
+/// Where a C-MOVE destination AE title is reached.
+#[derive(Debug, Clone)]
+pub struct Destination {
+    pub ae_title: String,
+    /// `host:port`.
+    pub address: String,
+}
+
 /// The matches of a C-FIND, each an identifier to return; an `Err` ends the query with that
 /// failure status.
 pub type Matches = BoxStream<'static, Result<InMemDicomObject, Status>>;
@@ -161,12 +186,35 @@ pub trait Handler: Send + Sync + 'static {
         let _ = (association, request, identifier);
         Err(Status::new(Status::SOP_CLASS_NOT_SUPPORTED))
     }
+
+    /// The instances a C-MOVE or C-GET for `identifier` sends.
+    async fn retrieve(
+        &self,
+        association: Arc<AssociationInfo>,
+        request: RetrieveRequest,
+        identifier: InMemDicomObject,
+    ) -> Result<Vec<Instance>, Status> {
+        let _ = (association, request, identifier);
+        Err(Status::new(Status::SOP_CLASS_NOT_SUPPORTED))
+    }
+
+    /// Opens the stored Part 10 file of an instance returned by [`retrieve`](Self::retrieve).
+    async fn open(&self, instance: &Instance) -> Result<ByteStream, Status> {
+        let _ = instance;
+        Err(Status::new(Status::SOP_CLASS_NOT_SUPPORTED))
+    }
+
+    /// Resolves a C-MOVE destination; `None` if it is unknown.
+    async fn destination(&self, ae_title: &str) -> Option<Destination> {
+        let _ = ae_title;
+        None
+    }
 }
 
 /// A DIMSE service provider.
 #[derive(Debug)]
 pub struct Scp<H> {
-    options: Arc<ServerAssociationOptions<'static, Access, DefaultNegotiation>>,
+    options: Arc<ServerAssociationOptions<'static, Access, Roles>>,
     config: Arc<ScpOptions>,
     handler: Arc<H>,
 }
@@ -178,19 +226,24 @@ impl<H: Handler> Scp<H> {
             require_called_ae: config.require_called_ae,
             allowed_calling: config.allowed_calling.clone(),
         };
+        let roles = Roles {
+            storage: config.storage_sop_classes.iter().cloned().collect(),
+        };
         let mut options = ServerAssociationOptions::new()
             .ae_access_control(access)
+            .with_negotiation(roles)
             .ae_title(config.ae_title.clone())
             .max_pdu_length(config.max_pdu_length)
             .with_abstract_syntax(uids::VERIFICATION);
         if let Some(timeout) = config.idle_timeout {
             options = options.read_timeout(timeout).write_timeout(timeout);
         }
-        for class in config
+        let classes = config
             .storage_sop_classes
             .iter()
             .chain(&config.find_sop_classes)
-        {
+            .chain(&config.retrieve_sop_classes);
+        for class in classes {
             options = options.with_abstract_syntax(class.clone());
         }
         for ts in config.accepted_transfer_syntaxes() {
@@ -231,10 +284,13 @@ impl<H: Handler> Scp<H> {
             while associations.try_join_next().is_some() {}
             let options = self.options.clone();
             let handler = self.handler.clone();
+            let ae_title = self.config.ae_title.clone();
             let shutdown = shutdown.clone();
             associations.spawn(async move {
                 let _permit = permit;
-                if let Err(e) = serve_connection(&options, handler, socket, peer, shutdown).await {
+                let result =
+                    serve_connection(&options, handler, ae_title, socket, peer, shutdown).await;
+                if let Err(e) = result {
                     tracing::info!(peer = %peer, error = %e, "association ended with an error");
                 }
             });
@@ -276,9 +332,34 @@ impl AccessControl for Access {
     }
 }
 
+/// SCP/SCU role selection: a peer may take the SCP role for storage classes, so that C-GET can
+/// send it instances on the same association.
+#[derive(Debug, Clone)]
+struct Roles {
+    storage: HashSet<String>,
+}
+
+/// `user` and `provider` are the SCU and SCP roles the requestor asks for.
+impl Negotiation for Roles {
+    fn negotiate_roles(
+        &self,
+        sop_class_uid: &str,
+        user: bool,
+        provider: bool,
+    ) -> Option<RequestorRoles> {
+        self.storage
+            .contains(sop_class_uid)
+            .then_some(RequestorRoles {
+                scu: user,
+                scp: provider,
+            })
+    }
+}
+
 async fn serve_connection<H: Handler>(
-    options: &ServerAssociationOptions<'static, Access, DefaultNegotiation>,
+    options: &ServerAssociationOptions<'static, Access, Roles>,
     handler: Arc<H>,
+    ae_title: String,
     socket: TcpStream,
     peer: SocketAddr,
     shutdown: CancellationToken,
@@ -307,9 +388,11 @@ async fn serve_connection<H: Handler>(
         association,
         info,
         handler,
+        ae_title,
         command: Vec::new(),
         pending: None,
         closed: false,
+        next_message_id: 1,
     };
     let result = tokio::select! {
         result = session.run() => result,
@@ -333,8 +416,9 @@ enum Sink {
         tx: Option<mpsc::Sender<medicus_core::Result<Bytes>>>,
         task: JoinHandle<Status>,
     },
-    /// Into a buffer: a C-FIND identifier, encoded in the context's transfer syntax.
-    Find {
+    /// Into a buffer: a C-FIND, C-MOVE or C-GET identifier, encoded in the context's transfer
+    /// syntax.
+    Identifier {
         identifier: Vec<u8>,
         transfer_syntax: String,
     },
@@ -359,11 +443,15 @@ struct Session<H> {
     association: AsyncServerAssociation<TcpStream>,
     info: Arc<AssociationInfo>,
     handler: Arc<H>,
+    /// This node's AE title (calling AE of C-MOVE sub-operations).
+    ae_title: String,
     /// Command fragments received so far.
     command: Vec<u8>,
     pending: Option<Pending>,
     /// The peer aborted the association.
     closed: bool,
+    /// Message ID of the next request this side sends (C-GET sub-operations).
+    next_message_id: u16,
 }
 
 impl<H: Handler> Session<H> {
@@ -436,7 +524,7 @@ impl<H: Handler> Session<H> {
                             *tx = None;
                         }
                     }
-                    Sink::Find { identifier, .. } => {
+                    Sink::Identifier { identifier, .. } => {
                         if identifier.len() + pdv.data.len() > MAX_IDENTIFIER {
                             return Err(Error::Protocol("C-FIND identifier too large".into()));
                         }
@@ -470,13 +558,17 @@ impl<H: Handler> Session<H> {
                     Status::new(Status::CANNOT_UNDERSTAND)
                 })
             }
-            Sink::Find {
+            Sink::Identifier {
                 identifier,
                 transfer_syntax,
             } => {
-                return self
-                    .find(&command, context_id, &identifier, &transfer_syntax)
-                    .await;
+                return if command.field() == Some(CommandField::C_FIND_RQ) {
+                    self.find(&command, context_id, &identifier, &transfer_syntax)
+                        .await
+                } else {
+                    self.retrieve(&command, context_id, &identifier, &transfer_syntax)
+                        .await
+                };
             }
             Sink::Discard(status) => status,
         };
@@ -615,8 +707,11 @@ impl<H: Handler> Session<H> {
         if field == CommandField::C_STORE_RQ {
             let sink = self.store_sink(&command, &abstract_syntax, transfer_syntax);
             self.expect_data_set(command, context_id, sink).await
-        } else if field == CommandField::C_FIND_RQ {
-            let sink = Sink::Find {
+        } else if field == CommandField::C_FIND_RQ
+            || field == CommandField::C_MOVE_RQ
+            || field == CommandField::C_GET_RQ
+        {
+            let sink = Sink::Identifier {
                 identifier: Vec::new(),
                 transfer_syntax,
             };
@@ -655,8 +750,8 @@ impl<H: Handler> Session<H> {
                 task.abort();
                 Status::new(Status::CANNOT_UNDERSTAND).with_comment("C-STORE without a data set")
             }
-            Sink::Find { .. } => Status::new(Status::IDENTIFIER_MISMATCH)
-                .with_comment("C-FIND without an identifier"),
+            Sink::Identifier { .. } => Status::new(Status::IDENTIFIER_MISMATCH)
+                .with_comment("request without an identifier"),
             Sink::Discard(status) => status,
         };
         self.respond(&command, context_id, &status).await
@@ -729,38 +824,10 @@ impl<H: Handler> Session<H> {
         command: &Command,
         data: Option<&[u8]>,
     ) -> Result<(), Error> {
-        let pdv = |value_type, is_last, data: &[u8]| PDataValue {
-            presentation_context_id: context_id,
-            value_type,
-            is_last,
-            data: data.to_vec(),
-        };
-        self.association
-            .send(&Pdu::PData {
-                data: vec![pdv(PDataValueType::Command, true, &command.encode()?)],
-            })
-            .await?;
+        message::send_command(&mut self.association, context_id, command).await?;
         if let Some(data) = data {
-            let max = self.association.requestor_max_pdu_length();
-            // A PDV item adds 6 bytes (length, context ID, header) to its fragment.
-            let fragment = if max == 0 {
-                1 << 20
-            } else {
-                (max as usize).saturating_sub(6).max(1)
-            };
-            let chunks: Vec<&[u8]> = if data.is_empty() {
-                vec![data]
-            } else {
-                data.chunks(fragment).collect()
-            };
-            let last = chunks.len() - 1;
-            for (i, chunk) in chunks.into_iter().enumerate() {
-                self.association
-                    .send(&Pdu::PData {
-                        data: vec![pdv(PDataValueType::Data, i == last, chunk)],
-                    })
-                    .await?;
-            }
+            let max_pdu = self.association.requestor_max_pdu_length();
+            message::send_data(&mut self.association, context_id, max_pdu, data).await?;
         }
         Ok(())
     }
