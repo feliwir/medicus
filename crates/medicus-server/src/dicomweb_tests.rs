@@ -326,3 +326,105 @@ async fn nodes_and_permissions() {
     );
     node.stop_services().await;
 }
+
+/// STOW-RS and C-STORE yield equivalent `instance.stored` events, delivered to a webhook.
+#[cfg(all(feature = "builtin-dimse", feature = "builtin-events-webhook"))]
+#[tokio::test(flavor = "multi_thread")]
+async fn stow_and_c_store_produce_equivalent_events() {
+    use std::sync::{Arc, Mutex};
+    let received: Arc<Mutex<Vec<Value>>> = Arc::default();
+    let record = received.clone();
+    let app = axum::Router::new().route(
+        "/hook",
+        axum::routing::post(move |axum::Json(event): axum::Json<Value>| {
+            let record = record.clone();
+            async move {
+                record.lock().unwrap().push(event);
+                axum::http::StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let hook_listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let hook_url = format!("http://{}/hook", hook_listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(hook_listener, app).await.unwrap() });
+
+    let dir = tempfile::tempdir().unwrap();
+    let (web_port, dimse_port) = (free_port(), free_port());
+    let toml = format!(
+        "[addons.dimse]\nconfig = {{ listen = \"127.0.0.1:{dimse_port}\" }}\n\
+         [addons.events-webhook]\nconfig = {{ hooks = [{{ name = \"test\", url = \"{hook_url}\", kinds = [\"instance.stored\"] }}] }}\n"
+    );
+    let node = node(dir.path(), web_port, &toml, json!({})).await;
+    let stop = tokio_util::sync::CancellationToken::new();
+    let delivery = crate::events::spawn(&node.archive, node.caps.event_hooks.clone(), &stop);
+
+    // Let the new subscriber start at the current end of the outbox before storing.
+    for _ in 0..500 {
+        if node
+            .archive
+            .index
+            .cursor("events-webhook/test")
+            .await
+            .unwrap()
+            .is_some()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let via_web = InstanceBuilder::new("4.1", "4.1.1", "4.1.1.1").build();
+    let (content_type, body) = stow_body(&[via_web]);
+    let response = reqwest::Client::new()
+        .post(format!("http://127.0.0.1:{web_port}/rs/studies"))
+        .header("content-type", content_type)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let via_dimse = InstanceBuilder::new("4.1", "4.1.1", "4.1.1.2").build();
+    let options =
+        medicus_dimse::ScuOptions::new("MODALITY", "MEDICUS", format!("127.0.0.1:{dimse_port}"));
+    let instance = medicus_dimse::Instance {
+        sop_class: dicom_dictionary_std::uids::CT_IMAGE_STORAGE.into(),
+        sop_instance: "4.1.1.2".into(),
+        transfer_syntax: dicom_dictionary_std::uids::EXPLICIT_VR_LITTLE_ENDIAN.into(),
+    };
+    let mut scu = medicus_dimse::StoreScu::connect(&options, [&instance])
+        .await
+        .unwrap();
+    let status = scu
+        .store(&instance, medicus_testkit::stream(&via_dimse, 4096), None)
+        .await
+        .unwrap();
+    assert!(status.is_success());
+    scu.release().await.unwrap();
+
+    for _ in 0..500 {
+        if received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+    let events = received.lock().unwrap().clone();
+    assert_eq!(events.len(), 2, "{events:?}");
+    let [web, dimse] = [&events[0], &events[1]];
+    // Same kind, partition, node and resource shape; only the origin differs.
+    for key in ["kind", "partition", "node"] {
+        assert_eq!(web[key], dimse[key], "{key}");
+    }
+    assert_eq!(web["origin"]["type"], "dicomweb");
+    assert_eq!(dimse["origin"]["type"], "dimse");
+    assert_eq!(dimse["origin"]["calling_ae"], "MODALITY");
+    let keys = |e: &Value| {
+        let mut k: Vec<String> = e["resource"].as_object().unwrap().keys().cloned().collect();
+        k.sort();
+        k
+    };
+    assert_eq!(keys(web), keys(dimse));
+    stop.cancel();
+    let mut delivery = delivery;
+    while delivery.join_next().await.is_some() {}
+    node.stop_services().await;
+}

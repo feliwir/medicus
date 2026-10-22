@@ -24,6 +24,8 @@ fn builtin(name: &str) -> Option<&'static StaticAddon> {
         "dimse" => Some(&dimse::ADDON),
         #[cfg(feature = "builtin-dicomweb")]
         "dicomweb" => Some(&dicomweb::ADDON),
+        #[cfg(feature = "builtin-events-webhook")]
+        "events-webhook" => Some(&events_webhook::ADDON),
         _ => None,
     }
 }

@@ -12,17 +12,19 @@ name = "medicus"
 path = "src/main.rs"
 
 [features]
-default = ["builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse", "builtin-dicomweb"]
+default = ["builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse", "builtin-dicomweb", "builtin-events-webhook"]
 builtin-storage-fs = ["dep:storage-fs"]
 builtin-index-sqlite = ["dep:index-sqlite"]
 builtin-dimse = ["dep:dimse"]
 builtin-dicomweb = ["dep:dicomweb"]
+builtin-events-webhook = ["dep:events-webhook"]
 
 [dependencies]
 medicus-core.workspace = true
 medicus-host.workspace = true
 dicomweb = { path = "../../addons/dicomweb", optional = true }
 dimse = { path = "../../addons/dimse", optional = true }
+events-webhook = { path = "../../addons/events-webhook", optional = true }
 index-sqlite = { path = "../../addons/index-sqlite", optional = true }
 storage-fs = { path = "../../addons/storage-fs", optional = true }
 
@@ -54,6 +56,7 @@ time.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+medicus-dimse.workspace = true
 http-body-util = "0.1"
 mime = "0.3"
 multer = "3"

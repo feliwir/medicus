@@ -1,0 +1,26 @@
+[package]
+name = "events-webhook"
+description = "medicus addon: delivers events to HTTP endpoints (webhooks)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+medicus-core.workspace = true
+
+hex = "0.4"
+hmac = "0.13"
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.11"
+tracing.workspace = true
+
+[dev-dependencies]
+axum = "0.8"
+tokio = { workspace = true, features = ["net", "rt-multi-thread", "macros"] }
+
+[lints]
+workspace = true
