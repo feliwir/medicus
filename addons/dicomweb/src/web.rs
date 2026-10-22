@@ -8,11 +8,12 @@ use std::sync::Arc;
 use axum::Router;
 use axum::extract::{ConnectInfo, FromRequestParts, Path};
 use axum::http::request::Parts;
-use axum::http::{HeaderName, header};
+use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::routing::{get, post};
 use medicus_addon_sdk::Host;
 use medicus_core::CallContext;
 use medicus_core::event::Origin;
+use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::error::{WebError, WebResult};
 use crate::{qido, stow, wado};
@@ -159,11 +160,33 @@ fn routes() -> Router<State> {
         )
 }
 
-pub(crate) fn router(state: State) -> Router {
-    Router::new()
+pub(crate) fn router(state: State, cors_origins: &[String]) -> medicus_core::Result<Router> {
+    let router = Router::new()
         .nest("/nodes/{node}/rs", routes())
         .nest("/rs", routes())
         .route("/health", post(|| async { "ok" }).get(|| async { "ok" }))
         .layer(axum::extract::DefaultBodyLimit::disable())
-        .with_state(state)
+        .with_state(state);
+    if cors_origins.is_empty() {
+        return Ok(router);
+    }
+    let origins = if cors_origins.iter().any(|o| o == "*") {
+        AllowOrigin::any()
+    } else {
+        let list = cors_origins
+            .iter()
+            .map(|o| {
+                HeaderValue::from_str(o).map_err(|e| {
+                    medicus_core::Error::invalid_argument(format!("cors_origins: {o:?}: {e}"))
+                })
+            })
+            .collect::<medicus_core::Result<Vec<_>>>()?;
+        AllowOrigin::list(list)
+    };
+    let cors = CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods([Method::GET, Method::POST, Method::OPTIONS])
+        .allow_headers(Any)
+        .expose_headers([header::CONTENT_TYPE, header::WARNING]);
+    Ok(router.layer(cors))
 }

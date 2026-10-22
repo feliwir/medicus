@@ -111,12 +111,16 @@ fn admits(headers: &HeaderMap, part_type: &str, transfer_syntax: &str) -> bool {
     let list = accepted(headers);
     list.is_empty()
         || list.iter().any(|a| {
+            // `transfer-syntax=*` asks for the data as stored, whatever its media type (this is
+            // how viewers such as OHIF ask for frames).
+            let any_syntax = a.transfer_syntax.as_deref() == Some("*");
             let media_ok = a.media == "*/*"
                 || a.media == "multipart/*"
                 || (a.media == "multipart/related"
-                    && a.part_type
-                        .as_deref()
-                        .is_none_or(|t| t == part_type || t == "*/*"));
+                    && (any_syntax
+                        || a.part_type
+                            .as_deref()
+                            .is_none_or(|t| t == part_type || t == "*/*")));
             let ts_ok = a
                 .transfer_syntax
                 .as_deref()
@@ -376,6 +380,14 @@ mod tests {
             "application/octet-stream",
             "1.2.840.10008.1.2.1"
         ));
+        // OHIF: octet-stream "in any transfer syntax" accepts compressed frames as stored.
+        h.insert(
+            header::ACCEPT,
+            "multipart/related; type=\"application/octet-stream\"; transfer-syntax=*"
+                .parse()
+                .unwrap(),
+        );
+        assert!(admits(&h, "image/jpeg", "1.2.840.10008.1.2.4.50"));
     }
 
     fn file(ts: &str, elements: Vec<dicom_object::mem::InMemElement>) -> Vec<u8> {

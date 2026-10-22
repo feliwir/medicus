@@ -51,6 +51,10 @@ pub struct Config {
     /// nobody can reach the listener without going through that proxy.
     #[serde(default)]
     pub user_header: Option<String>,
+    /// Origins allowed to call the API from a browser (CORS), e.g. a viewer's
+    /// `http://viewer.example.org`; `*` allows any. Empty: no CORS headers.
+    #[serde(default)]
+    pub cors_origins: Vec<String>,
 }
 
 fn default_listen() -> SocketAddr {
@@ -120,7 +124,8 @@ impl Service for Listener {
         let addr = listener.local_addr().unwrap_or(listen);
         let token = CancellationToken::new();
         let shutdown = token.clone();
-        let app = web::router(state).into_make_service_with_connect_info::<SocketAddr>();
+        let app = web::router(state, &self.cfg.cors_origins)?
+            .into_make_service_with_connect_info::<SocketAddr>();
         let task = runtime().spawn(async move {
             let served = axum::serve(listener, app)
                 .with_graceful_shutdown(async move { shutdown.cancelled().await })
