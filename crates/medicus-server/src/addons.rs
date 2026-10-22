@@ -84,12 +84,10 @@ impl Capabilities {
     }
 }
 
-/// The addons to load: the configured ones, or, if none are configured, the built-in local
-/// storage and `SQLite` index below `data_dir` (zero-configuration start).
-fn effective_entries(cfg: &Config) -> BTreeMap<String, AddonEntry> {
-    if !cfg.addons.entries.is_empty() {
-        return cfg.addons.entries.clone();
-    }
+/// Built-in addons that stand in for missing configuration (zero-configuration start): the local
+/// filesystem store and the `SQLite` index below `data_dir`, each loaded only if no configured
+/// addon registered the archive's default store or index and the addon is not configured itself.
+fn fallback_entries(cfg: &Config, caps: &Capabilities) -> Vec<(String, AddonEntry)> {
     let data = &cfg.server.data_dir;
     let entry = |config| AddonEntry {
         enabled: true,
@@ -97,16 +95,29 @@ fn effective_entries(cfg: &Config) -> BTreeMap<String, AddonEntry> {
         sha256: None,
         config,
     };
-    BTreeMap::from([
-        (
+    let missing = |addon: &str, provided: bool| {
+        !provided && !cfg.addons.entries.contains_key(addon) && builtin(addon).is_some()
+    };
+    let mut out = Vec::new();
+    if missing(
+        "storage-fs",
+        caps.blob_stores.contains_key(&cfg.archive.storage),
+    ) {
+        out.push((
             "storage-fs".to_owned(),
             entry(json!({ "root": data.join("blobs"), "name": cfg.archive.storage })),
-        ),
-        (
+        ));
+    }
+    if missing(
+        "index-sqlite",
+        caps.index_stores.contains_key(&cfg.archive.index),
+    ) {
+        out.push((
             "index-sqlite".to_owned(),
             entry(json!({ "path": data.join("index.sqlite"), "name": cfg.archive.index })),
-        ),
-    ])
+        ));
+    }
+    out
 }
 
 fn resolve_library(path: &Path, search_paths: &[PathBuf]) -> anyhow::Result<PathBuf> {
@@ -141,28 +152,42 @@ fn verify_sha256(path: &Path, expected: &str) -> anyhow::Result<()> {
 pub(crate) fn load(cfg: &Config, rt: &Handle) -> anyhow::Result<Capabilities> {
     let loader = AddonLoader::new(rt.clone());
     let mut caps = Capabilities::default();
-    for (name, entry) in effective_entries(cfg).iter().filter(|(_, e)| e.enabled) {
-        let addon = if let Some(lib) = &entry.library {
-            let path = resolve_library(lib, &cfg.addons.search_paths)?;
-            if let Some(expected) = &entry.sha256 {
-                verify_sha256(&path, expected)?;
-            }
-            loader.load_library(&path, name, &entry.config)
-        } else {
-            let Some(statics) = builtin(name) else {
-                bail!("addon {name:?} is not built into this server; set `library` to load it");
-            };
-            if entry.sha256.is_some() {
-                bail!("addon {name:?}: `sha256` only applies to libraries");
-            }
-            loader.load_static(statics, name, &entry.config)
-        }
-        .with_context(|| format!("loading addon {name:?}"))?;
+    for (name, entry) in cfg.addons.entries.iter().filter(|(_, e)| e.enabled) {
+        let addon = load_one(&loader, cfg, name, entry)?;
+        caps.add(addon)?;
+    }
+    for (name, entry) in fallback_entries(cfg, &caps) {
+        tracing::debug!(addon = %name, "loading built-in default");
+        let addon = load_one(&loader, cfg, &name, &entry)?;
         caps.add(addon)?;
     }
     tracing::info!(?caps, "addons loaded");
     caps.loader = Some(loader);
     Ok(caps)
+}
+
+fn load_one(
+    loader: &AddonLoader,
+    cfg: &Config,
+    name: &str,
+    entry: &AddonEntry,
+) -> anyhow::Result<LoadedAddon> {
+    if let Some(lib) = &entry.library {
+        let path = resolve_library(lib, &cfg.addons.search_paths)?;
+        if let Some(expected) = &entry.sha256 {
+            verify_sha256(&path, expected)?;
+        }
+        loader.load_library(&path, name, &entry.config)
+    } else {
+        let Some(statics) = builtin(name) else {
+            bail!("addon {name:?} is not built into this server; set `library` to load it");
+        };
+        if entry.sha256.is_some() {
+            bail!("addon {name:?}: `sha256` only applies to libraries");
+        }
+        loader.load_static(statics, name, &entry.config)
+    }
+    .with_context(|| format!("loading addon {name:?}"))
 }
 
 #[cfg(test)]
@@ -171,14 +196,23 @@ mod tests {
 
     #[test]
     fn zero_config_uses_builtin_local_addons() {
-        let cfg = Config::default();
-        let entries = effective_entries(&cfg);
+        let mut cfg = Config::default();
+        let entries = fallback_entries(&cfg, &Capabilities::default());
         assert_eq!(
-            entries.keys().collect::<Vec<_>>(),
-            ["index-sqlite", "storage-fs"]
+            entries.iter().map(|(n, _)| n.as_str()).collect::<Vec<_>>(),
+            ["storage-fs", "index-sqlite"]
         );
-        assert!(entries.values().all(|e| e.library.is_none()));
-        assert_eq!(entries["storage-fs"].config["name"], "local");
+        assert!(entries.iter().all(|(_, e)| e.library.is_none()));
+        assert_eq!(entries[0].1.config["name"], "local");
+
+        // Configuring an unrelated addon keeps the defaults; configuring one disables it.
+        let entry: AddonEntry = serde_json::from_value(json!({ "config": {} })).unwrap();
+        cfg.addons.entries.insert("dimse".into(), entry.clone());
+        assert_eq!(fallback_entries(&cfg, &Capabilities::default()).len(), 2);
+        cfg.addons.entries.insert("storage-fs".into(), entry);
+        let entries = fallback_entries(&cfg, &Capabilities::default());
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].0, "index-sqlite");
     }
 
     #[test]
