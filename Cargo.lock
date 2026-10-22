@@ -1446,6 +1446,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "medicus-bench"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "futures",
+ "medicus-core",
+ "medicus-server",
+ "medicus-testkit",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "medicus-core"
 version = "0.1.0"
 dependencies = [

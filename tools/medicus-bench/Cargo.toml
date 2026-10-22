@@ -1,0 +1,24 @@
+[package]
+name = "medicus-bench"
+description = "Ingest benchmark for medicus (PLAN §3.9)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+medicus-core.workspace = true
+medicus-server = { path = "../../crates/medicus-server" }
+medicus-testkit.workspace = true
+
+anyhow.workspace = true
+clap.workspace = true
+futures.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true
