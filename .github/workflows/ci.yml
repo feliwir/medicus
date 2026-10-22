@@ -58,6 +58,18 @@ jobs:
         env:
           MEDICUS_C_SANITIZE: address
 
+  # The DIMSE addon against DCMTK's echoscu/storescu.
+  dcmtk-interop:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: sudo apt-get update && sudo apt-get install -y dcmtk
+      - run: cargo test -p medicus-server --lib dcmtk_tests
+        env:
+          MEDICUS_DCMTK_BIN: /usr/bin
+
   msrv:
     runs-on: ubuntu-latest
     steps:

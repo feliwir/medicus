@@ -6,6 +6,8 @@ mod api;
 mod archive;
 mod capacity;
 mod config;
+#[cfg(test)]
+mod dcmtk_tests;
 mod events;
 mod import;
 mod ingest;

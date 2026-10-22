@@ -20,6 +20,8 @@ fn builtin(name: &str) -> Option<&'static StaticAddon> {
         "storage-fs" => Some(&storage_fs::ADDON),
         #[cfg(feature = "builtin-index-sqlite")]
         "index-sqlite" => Some(&index_sqlite::ADDON),
+        #[cfg(feature = "builtin-dimse")]
+        "dimse" => Some(&dimse::ADDON),
         _ => None,
     }
 }

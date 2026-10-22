@@ -213,6 +213,28 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn deflated_data_sets_are_parsed_while_streaming() {
+        let f = fixture().await;
+        let file = InstanceBuilder::new("1.2.3", "1.2.3.1", "1.2.3.1.9")
+            .transfer_syntax(dicom_dictionary_std::uids::DEFLATED_EXPLICIT_VR_LITTLE_ENDIAN)
+            .pixel_data(200_000)
+            .with_sequence()
+            .build();
+        assert!(
+            !file.windows(8).any(|w| w == b"Doe^John"),
+            "the data set is compressed"
+        );
+        let stored = f
+            .archive
+            .ingest(stream(&file, 997), origin())
+            .await
+            .unwrap();
+        assert_eq!(stored.instance.as_str(), "1.2.3.1.9");
+        let (_, data) = f.archive.retrieve(&stored.instance).await.unwrap();
+        assert_eq!(read_all(data).await, file, "stored byte-identically");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn ingest_retrieve_and_event() {
         let f = fixture().await;
         let file = InstanceBuilder::new("1.2.3", "1.2.3.1", "1.2.3.1.1")

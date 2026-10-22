@@ -12,13 +12,15 @@ name = "medicus"
 path = "src/main.rs"
 
 [features]
-default = ["builtin-storage-fs", "builtin-index-sqlite"]
+default = ["builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse"]
 builtin-storage-fs = ["dep:storage-fs"]
 builtin-index-sqlite = ["dep:index-sqlite"]
+builtin-dimse = ["dep:dimse"]
 
 [dependencies]
 medicus-core.workspace = true
 medicus-host.workspace = true
+dimse = { path = "../../addons/dimse", optional = true }
 index-sqlite = { path = "../../addons/index-sqlite", optional = true }
 storage-fs = { path = "../../addons/storage-fs", optional = true }
 
@@ -34,6 +36,8 @@ dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
 dicom-json.workspace = true
 dicom-object.workspace = true
+# Deflated data sets are readable only with this feature.
+dicom-transfer-syntax-registry.workspace = true
 clap.workspace = true
 figment.workspace = true
 serde = { workspace = true, features = ["rc"] }

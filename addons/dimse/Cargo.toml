@@ -1,0 +1,20 @@
+[package]
+name = "dimse"
+description = "medicus DIMSE addon: Storage SCP (C-ECHO, C-STORE) feeding the archive."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+medicus-core.workspace = true
+medicus-dimse.workspace = true
+
+serde.workspace = true
+tokio = { workspace = true, features = ["net"] }
+tokio-util = "0.7"
+tracing.workspace = true
+
+[lints]
+workspace = true

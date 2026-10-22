@@ -1,0 +1,20 @@
+[package]
+name = "dimse-dylib"
+description = "The dimse addon as a dynamically loadable library."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[lib]
+# `medicus_dimse` is the protocol crate this addon builds on.
+name = "medicus_addon_dimse"
+crate-type = ["cdylib"]
+
+[dependencies]
+medicus-addon-sdk.workspace = true
+dimse = { path = "../dimse" }
+
+[lints]
+workspace = true
