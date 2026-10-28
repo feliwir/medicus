@@ -716,6 +716,7 @@ dependencies = [
  "bytes",
  "dicom-core",
  "dicom-dictionary-std",
+ "dicom-encoding",
  "dicom-object",
  "futures",
  "medicus-addon-sdk",

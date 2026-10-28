@@ -15,6 +15,7 @@ axum = "0.8"
 bytes.workspace = true
 dicom-core.workspace = true
 dicom-dictionary-std.workspace = true
+dicom-encoding.workspace = true
 dicom-object.workspace = true
 futures.workspace = true
 mime = "0.3"

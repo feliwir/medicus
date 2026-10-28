@@ -8,8 +8,8 @@ use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use bytes::Bytes;
-use dicom_core::value::Value as DicomValue;
 use dicom_dictionary_std::tags;
+use dicom_encoding::adapters::PixelDataObject as _;
 use futures::StreamExt as _;
 use medicus_core::capability::index::{InstanceLocation, ResourceUid};
 use medicus_core::capability::{ByteStream, HostServices as _};
@@ -218,9 +218,6 @@ pub(crate) fn frame_media_type(transfer_syntax: &str) -> &'static str {
     }
 }
 
-/// The error of [`extract_frames`] for instances without pixel data (e.g. presentation states).
-const NO_PIXEL_DATA: &str = "the instance has no pixel data";
-
 /// The 1-based frame numbers of a `frames/{list}` path.
 fn frame_numbers(list: &str) -> WebResult<Vec<usize>> {
     list.split(',')
@@ -231,64 +228,42 @@ fn frame_numbers(list: &str) -> WebResult<Vec<usize>> {
         .collect()
 }
 
-/// The frames of a stored file (as stored): native pixel data split by frame size,
-/// encapsulated pixel data by fragments (one per frame) or the Basic Offset Table.
-pub(crate) fn extract_frames(file: &[u8]) -> Result<Vec<Bytes>, String> {
-    if file.len() < 132 {
-        return Err("not a DICOM file".into());
+/// Why requested frames cannot be returned.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum FrameError {
+    /// The instance has no pixel data (e.g. a presentation state).
+    NoPixelData,
+    /// The frame number is beyond the instance's frames.
+    NoSuchFrame(usize),
+    /// The file or its pixel data cannot be read.
+    Unreadable(String),
+}
+
+/// Frames `numbers` (1-based) of a stored Part 10 file, as stored, via dicom-rs
+/// ([`PixelDataObject::frame_pixel_data`]): native frames by frame size, encapsulated frames by
+/// fragment or Basic Offset Table.
+pub(crate) fn extract_frames(file: &[u8], numbers: &[usize]) -> Result<Vec<Bytes>, FrameError> {
+    let obj = dicom_object::OpenFileOptions::new()
+        .from_reader(file)
+        .map_err(|e| FrameError::Unreadable(e.to_string()))?;
+    if obj.get(tags::PIXEL_DATA).is_none() {
+        return Err(FrameError::NoPixelData);
     }
-    let obj = dicom_object::from_reader(&file[128..]).map_err(|e| e.to_string())?;
-    let int = |tag| -> usize {
-        obj.element(tag)
-            .ok()
-            .and_then(|e| e.to_int::<usize>().ok())
-            .unwrap_or(0)
-    };
-    let frames = int(tags::NUMBER_OF_FRAMES).max(1);
-    let pixel = obj.element(tags::PIXEL_DATA).map_err(|_| NO_PIXEL_DATA)?;
-    match pixel.value() {
-        DicomValue::PixelSequence(seq) => {
-            let fragments = seq.fragments();
-            let offsets = seq.offset_table();
-            if fragments.len() == frames {
-                return Ok(fragments
-                    .iter()
-                    .map(|f| Bytes::copy_from_slice(f))
-                    .collect());
+    let frames = obj.number_of_frames().unwrap_or(1) as usize;
+    numbers
+        .iter()
+        .map(|&n| {
+            if n > frames {
+                return Err(FrameError::NoSuchFrame(n));
             }
-            if frames == 1 {
-                return Ok(vec![Bytes::from(fragments.concat())]);
-            }
-            if offsets.len() == frames {
-                // Offsets point into the item stream: each fragment item has an 8-byte header.
-                let mut out = vec![Vec::new(); frames];
-                let mut position = 0u64;
-                for fragment in fragments {
-                    let frame = offsets
-                        .iter()
-                        .rposition(|o| u64::from(*o) <= position)
-                        .unwrap_or(0);
-                    out[frame].extend_from_slice(fragment);
-                    position += 8 + fragment.len() as u64;
-                }
-                return Ok(out.into_iter().map(Bytes::from).collect());
-            }
-            Err("cannot tell the frames of the encapsulated pixel data apart".into())
-        }
-        DicomValue::Primitive(_) => {
-            let data = pixel.to_bytes().map_err(|e| e.to_string())?;
-            let samples = int(tags::SAMPLES_PER_PIXEL).max(1);
-            let bits = int(tags::BITS_ALLOCATED).max(1);
-            let size = int(tags::ROWS) * int(tags::COLUMNS) * samples * bits / 8;
-            if size == 0 || data.len() < size * frames {
-                return Err("pixel data is shorter than the image attributes say".into());
-            }
-            Ok((0..frames)
-                .map(|i| Bytes::copy_from_slice(&data[i * size..(i + 1) * size]))
-                .collect())
-        }
-        DicomValue::Sequence(_) => Err("pixel data is a sequence".into()),
-    }
+            let index = u32::try_from(n - 1).map_err(|_| FrameError::NoSuchFrame(n))?;
+            obj.frame_pixel_data(index)
+                .map(|data| Bytes::from(data.into_owned()))
+                .ok_or_else(|| {
+                    FrameError::Unreadable(format!("frame {n} cannot be read from the pixel data"))
+                })
+        })
+        .collect()
 }
 
 /// `GET .../instances/{instance}/frames/{list}`: the requested frames, as stored.
@@ -321,22 +296,21 @@ pub(crate) async fn frames(
             ));
         }
     }
-    let all = tokio::task::spawn_blocking(move || extract_frames(&file))
+    let wanted = numbers.clone();
+    let extracted = tokio::task::spawn_blocking(move || extract_frames(&file, &wanted))
         .await
         .map_err(|e| WebError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| {
-            let status = if e == NO_PIXEL_DATA {
-                StatusCode::NOT_FOUND
-            } else {
-                StatusCode::UNPROCESSABLE_ENTITY
-            };
-            WebError::new(status, e)
+        .map_err(|e| match e {
+            FrameError::NoPixelData => {
+                WebError::new(StatusCode::NOT_FOUND, "the instance has no pixel data")
+            }
+            FrameError::NoSuchFrame(n) => {
+                WebError::new(StatusCode::NOT_FOUND, format!("frame {n} does not exist"))
+            }
+            FrameError::Unreadable(e) => WebError::new(StatusCode::UNPROCESSABLE_ENTITY, e),
         })?;
-    let mut parts = Vec::with_capacity(numbers.len());
-    for n in numbers {
-        let frame = all.get(n - 1).cloned().ok_or_else(|| {
-            WebError::new(StatusCode::NOT_FOUND, format!("frame {n} does not exist"))
-        })?;
+    let mut parts = Vec::with_capacity(extracted.len());
+    for frame in extracted {
         let content_type = if media == "application/octet-stream" {
             media.to_owned()
         } else {
@@ -408,6 +382,11 @@ mod tests {
             DataElement::new(tags::BITS_ALLOCATED, VR::US, PrimitiveValue::from(8_u16)),
             DataElement::new(tags::SAMPLES_PER_PIXEL, VR::US, PrimitiveValue::from(1_u16)),
             DataElement::new(tags::NUMBER_OF_FRAMES, VR::IS, PrimitiveValue::from("3")),
+            DataElement::new(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
         ];
         all.extend(elements);
         let obj = dicom_object::InMemDicomObject::from_element_iter(all)
@@ -430,9 +409,10 @@ mod tests {
                 PrimitiveValue::from(pixels),
             )],
         );
-        let frames = extract_frames(&f).unwrap();
-        assert_eq!(frames.len(), 3);
-        assert_eq!(&frames[2][..], &[8, 9, 10, 11]);
+        let frames = extract_frames(&f, &[3, 1]).unwrap();
+        assert_eq!(&frames[0][..], &[8, 9, 10, 11]);
+        assert_eq!(&frames[1][..], &[0, 1, 2, 3]);
+        assert_eq!(extract_frames(&f, &[4]), Err(FrameError::NoSuchFrame(4)));
     }
 
     #[test]
@@ -445,7 +425,7 @@ mod tests {
             "1.2.840.10008.1.2.4.50",
             vec![DataElement::new(tags::PIXEL_DATA, VR::OB, seq)],
         );
-        let frames = extract_frames(&f).unwrap();
+        let frames = extract_frames(&f, &[1, 2, 3]).unwrap();
         assert_eq!(
             frames.iter().map(|f| f.to_vec()).collect::<Vec<_>>(),
             [vec![1, 2], vec![3, 4], vec![5, 6]]
