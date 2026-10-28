@@ -78,6 +78,21 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-targets
 
+  # The conformance statement as PDF (its generated tables are checked by the tests).
+  conformance-pdf:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: typst-community/setup-typst@v4
+        with:
+          typst-version: 0.15.1
+      - run: sudo apt-get update && sudo apt-get install -y fonts-inter
+      - run: typst compile docs/conformance/conformance-statement.typ conformance-statement.pdf
+      - uses: actions/upload-artifact@v4
+        with:
+          name: conformance-statement
+          path: conformance-statement.pdf
+
   deny:
     runs-on: ubuntu-latest
     steps:

@@ -16,6 +16,10 @@ mod find;
 mod remote;
 mod retrieve;
 
+/// The Query/Retrieve information models served, for the conformance statement.
+pub use find::FIND_SOP_CLASSES;
+pub use retrieve::RETRIEVE_SOP_CLASSES;
+
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};

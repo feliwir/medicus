@@ -17,7 +17,7 @@ use medicus_dimse::{Matches, Status};
 const PAGE: u32 = 100;
 
 /// The information models served.
-pub(crate) const FIND_SOP_CLASSES: &[&str] = &[
+pub const FIND_SOP_CLASSES: &[&str] = &[
     uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND,
     uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_FIND,
 ];

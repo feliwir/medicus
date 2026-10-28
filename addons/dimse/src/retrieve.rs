@@ -11,7 +11,7 @@ use medicus_core::{CallContext, Error, ErrorKind, QueryLevel, VR, tags};
 use medicus_dimse::{Destination, Instance, Status};
 
 /// The information models served.
-pub(crate) const RETRIEVE_SOP_CLASSES: &[&str] = &[
+pub const RETRIEVE_SOP_CLASSES: &[&str] = &[
     uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE,
     uids::STUDY_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_MOVE,
     uids::PATIENT_ROOT_QUERY_RETRIEVE_INFORMATION_MODEL_GET,

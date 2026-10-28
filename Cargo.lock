@@ -2241,6 +2241,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "medicus-conformance"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dicom-core",
+ "dicom-dictionary-std",
+ "dicom-encoding",
+ "dicom-transfer-syntax-registry",
+ "dimse",
+ "medicus-dimse",
+ "medicus-server",
+]
+
+[[package]]
 name = "medicus-core"
 version = "0.1.0"
 dependencies = [

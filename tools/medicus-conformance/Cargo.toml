@@ -1,0 +1,23 @@
+[package]
+name = "medicus-conformance"
+description = "Keeps the generated tables of the DICOM Conformance Statement in step with the code."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+# The server with its default features: the transfer syntaxes read here are those of the binary.
+medicus-server = { path = "../../crates/medicus-server" }
+medicus-dimse.workspace = true
+dimse = { path = "../../addons/dimse" }
+
+anyhow.workspace = true
+dicom-core.workspace = true
+dicom-dictionary-std = { workspace = true, features = ["sop-class"] }
+dicom-encoding.workspace = true
+dicom-transfer-syntax-registry.workspace = true
+
+[lints]
+workspace = true
