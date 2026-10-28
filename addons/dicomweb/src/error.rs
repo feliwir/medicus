@@ -25,6 +25,11 @@ impl WebError {
         Self::new(StatusCode::BAD_REQUEST, message)
     }
 
+    #[cfg(test)]
+    pub(crate) fn status(&self) -> StatusCode {
+        self.status
+    }
+
     pub(crate) fn not_acceptable(message: impl Into<String>) -> Self {
         Self::new(StatusCode::NOT_ACCEPTABLE, message)
     }

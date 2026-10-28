@@ -245,6 +245,80 @@ async fn stow_qido_wado() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn rendered_resources() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let node = node(dir.path(), port, "", json!({})).await;
+    let base = format!("http://127.0.0.1:{port}/rs");
+    let client = reqwest::Client::new();
+
+    let file = InstanceBuilder::new("3.1", "3.1.1", "3.1.1.1")
+        .image(16, 32)
+        .build();
+    let (content_type, body) = stow_body(&[file]);
+    let response = client
+        .post(format!("{base}/studies"))
+        .header("content-type", content_type)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), 200);
+
+    let get = |path: &str, accept: &str| {
+        let request = client.get(format!("{base}{path}")).header("accept", accept);
+        async move { request.send().await.unwrap() }
+    };
+    let instance = "/studies/3.1/series/3.1.1/instances/3.1.1.1";
+
+    // JPEG by default, at every level, and for thumbnails.
+    for path in [
+        "/studies/3.1/rendered".to_owned(),
+        "/studies/3.1/series/3.1.1/thumbnail".to_owned(),
+        format!("{instance}/rendered"),
+        format!("{instance}/frames/1/rendered"),
+    ] {
+        let response = get(&path, "*/*").await;
+        assert_eq!(response.status(), 200, "{path}");
+        assert_eq!(response.headers()["content-type"], "image/jpeg");
+        assert_eq!(&response.bytes().await.unwrap()[..2], [0xFF, 0xD8]);
+    }
+
+    // PNG scaled to the viewport: the IHDR chunk holds width and height.
+    let response = get(
+        &format!("{instance}/rendered?viewport=64,64&window=125,250,linear&annotation=patient"),
+        "image/png",
+    )
+    .await;
+    assert_eq!(response.status(), 200);
+    assert_eq!(response.headers()["content-type"], "image/png");
+    assert!(response.headers().contains_key("warning"));
+    let png = response.bytes().await.unwrap();
+    assert_eq!(&png[1..4], b"PNG");
+    assert_eq!(&png[16..24], [0, 0, 0, 64, 0, 0, 0, 64]);
+
+    assert_eq!(
+        get(&format!("{instance}/rendered"), "video/mp4")
+            .await
+            .status(),
+        406
+    );
+    assert_eq!(
+        get(&format!("{instance}/frames/2/rendered"), "*/*")
+            .await
+            .status(),
+        404
+    );
+    assert_eq!(
+        get(&format!("{instance}/rendered?quality=0"), "*/*")
+            .await
+            .status(),
+        400
+    );
+    node.stop_services().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn nodes_and_permissions() {
     let dir = tempfile::tempdir().unwrap();
     let port = free_port();

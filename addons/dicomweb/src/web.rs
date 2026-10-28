@@ -16,7 +16,7 @@ use medicus_core::event::Origin;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
 use crate::error::{WebError, WebResult};
-use crate::{qido, stow, wado};
+use crate::{qido, render, stow, wado};
 
 /// What every handler needs.
 #[derive(Debug, Clone)]
@@ -157,6 +157,33 @@ fn routes() -> Router<State> {
         .route(
             "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}",
             get(wado::frames),
+        )
+        // Rendered resources and thumbnails
+        .route("/studies/{study}/rendered", get(render::rendered))
+        .route("/studies/{study}/thumbnail", get(render::rendered))
+        .route(
+            "/studies/{study}/series/{series}/rendered",
+            get(render::rendered),
+        )
+        .route(
+            "/studies/{study}/series/{series}/thumbnail",
+            get(render::rendered),
+        )
+        .route(
+            "/studies/{study}/series/{series}/instances/{instance}/rendered",
+            get(render::rendered),
+        )
+        .route(
+            "/studies/{study}/series/{series}/instances/{instance}/thumbnail",
+            get(render::rendered),
+        )
+        .route(
+            "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}/rendered",
+            get(render::rendered),
+        )
+        .route(
+            "/studies/{study}/series/{series}/instances/{instance}/frames/{frames}/thumbnail",
+            get(render::rendered),
         )
 }
 

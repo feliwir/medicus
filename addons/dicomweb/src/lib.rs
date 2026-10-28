@@ -8,7 +8,8 @@
 //! Every node with a `DICOMweb` path is served at `/nodes/{path}/rs` (ADR-0003); the default
 //! node also at `/rs`. Each request reaches the host with the node and the caller, so the core
 //! decides what the caller may do and in which partition, exactly as for DIMSE. Instances are
-//! returned as stored: a request for another transfer syntax is answered with 406.
+//! returned as stored: a request for another transfer syntax is answered with 406. Rendered
+//! resources and thumbnails are decoded with dicom-pixeldata and served as JPEG, PNG or GIF.
 //!
 //! The addon runs its own HTTP listener. Authentication is left to a reverse proxy for now:
 //! with `user_header` set, the header it names (e.g. `X-Forwarded-User`) is taken as the
@@ -17,6 +18,7 @@
 mod error;
 mod multipart;
 mod qido;
+mod render;
 mod stow;
 mod wado;
 mod web;

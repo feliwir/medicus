@@ -1,6 +1,6 @@
 [package]
 name = "dicomweb"
-description = "medicus DICOMweb addon: QIDO-RS, WADO-RS and STOW-RS per node."
+description = "medicus DICOMweb addon: QIDO-RS, WADO-RS (incl. rendered) and STOW-RS per node."
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -27,6 +27,8 @@ tokio-util = "0.7"
 tower-http = { version = "0.6", features = ["cors"] }
 tracing.workspace = true
 uuid.workspace = true
+dicom-pixeldata = { version = "0.10", features = ["image"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif"] }
 
 [lints]
 workspace = true

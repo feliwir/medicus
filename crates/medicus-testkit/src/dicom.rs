@@ -65,6 +65,32 @@ impl InstanceBuilder {
         self
     }
 
+    /// Makes it a renderable 8-bit MONOCHROME2 image of `rows` × `columns`, with matching Pixel
+    /// Data.
+    #[must_use]
+    pub fn image(mut self, rows: u16, columns: u16) -> Self {
+        let us = |tag: Tag, v: u16| DataElement::new(tag, VR::US, PrimitiveValue::from(v));
+        let attrs = [
+            us(tags::ROWS, rows),
+            us(tags::COLUMNS, columns),
+            us(tags::BITS_ALLOCATED, 8),
+            us(tags::BITS_STORED, 8),
+            us(tags::HIGH_BIT, 7),
+            us(tags::PIXEL_REPRESENTATION, 0),
+            us(tags::SAMPLES_PER_PIXEL, 1),
+            DataElement::new(
+                tags::PHOTOMETRIC_INTERPRETATION,
+                VR::CS,
+                PrimitiveValue::from("MONOCHROME2"),
+            ),
+        ];
+        self.elements
+            .retain(|e| !attrs.iter().any(|a| a.tag() == e.tag()));
+        self.elements.extend(attrs);
+        self.pixel_data = usize::from(rows) * usize::from(columns);
+        self
+    }
+
     /// Adds a Procedure Code Sequence with two items.
     #[must_use]
     pub fn with_sequence(mut self) -> Self {

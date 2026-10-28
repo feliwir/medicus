@@ -20,8 +20,8 @@ use crate::error::{WebError, WebResult};
 use crate::multipart::{self, Part};
 use crate::web::{Request, State as Web};
 
-/// Largest instance whose frames are extracted (the whole file is read into memory).
-const MAX_FRAMES_FILE: usize = 2 << 30;
+/// Largest instance whose frames are extracted or rendered (the whole file is read into memory).
+const MAX_DECODED_FILE: usize = 2 << 30;
 
 fn uid<T>(
     raw: &str,
@@ -45,7 +45,7 @@ fn resource(req: &Request) -> WebResult<ResourceUid> {
 }
 
 /// The stored instances of the path's resource; 404 if there are none.
-async fn locate(web: &Web, req: &Request) -> WebResult<Vec<InstanceLocation>> {
+pub(crate) async fn locate(web: &Web, req: &Request) -> WebResult<Vec<InstanceLocation>> {
     let resource = resource(req)?;
     let mut found = web.host.locate(&req.context, &resource).await?;
     // The path's higher-level UIDs must match too.
@@ -63,14 +63,14 @@ async fn locate(web: &Web, req: &Request) -> WebResult<Vec<InstanceLocation>> {
 
 /// One acceptable representation from an Accept header: media type and its parameters.
 #[derive(Debug, Clone)]
-struct Acceptable {
-    media: String,
+pub(crate) struct Acceptable {
+    pub(crate) media: String,
     /// The `type` parameter of `multipart/related`.
     part_type: Option<String>,
     transfer_syntax: Option<String>,
 }
 
-fn accepted(headers: &HeaderMap) -> Vec<Acceptable> {
+pub(crate) fn accepted(headers: &HeaderMap) -> Vec<Acceptable> {
     let raw = headers
         .get_all(header::ACCEPT)
         .iter()
@@ -219,7 +219,7 @@ pub(crate) fn frame_media_type(transfer_syntax: &str) -> &'static str {
 }
 
 /// The 1-based frame numbers of a `frames/{list}` path.
-fn frame_numbers(list: &str) -> WebResult<Vec<usize>> {
+pub(crate) fn frame_numbers(list: &str) -> WebResult<Vec<usize>> {
     list.split(',')
         .map(|n| match n.trim().parse::<usize>() {
             Ok(n) if n >= 1 => Ok(n),
@@ -237,6 +237,43 @@ pub(crate) enum FrameError {
     NoSuchFrame(usize),
     /// The file or its pixel data cannot be read.
     Unreadable(String),
+}
+
+impl From<FrameError> for WebError {
+    fn from(e: FrameError) -> Self {
+        match e {
+            FrameError::NoPixelData => {
+                WebError::new(StatusCode::NOT_FOUND, "the instance has no pixel data")
+            }
+            FrameError::NoSuchFrame(n) => {
+                WebError::new(StatusCode::NOT_FOUND, format!("frame {n} does not exist"))
+            }
+            FrameError::Unreadable(e) => WebError::new(StatusCode::UNPROCESSABLE_ENTITY, e),
+        }
+    }
+}
+
+/// A stored instance's whole Part 10 file, for decoding.
+pub(crate) async fn read_instance(
+    web: &Web,
+    req: &Request,
+    location: &InstanceLocation,
+) -> WebResult<Vec<u8>> {
+    let mut file = Vec::new();
+    let mut stream: ByteStream = web
+        .host
+        .open_instance(&req.context, &location.instance)
+        .await?;
+    while let Some(chunk) = stream.next().await {
+        file.extend_from_slice(&chunk?);
+        if file.len() > MAX_DECODED_FILE {
+            return Err(WebError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "instance too large to decode",
+            ));
+        }
+    }
+    Ok(file)
 }
 
 /// Frames `numbers` (1-based) of a stored Part 10 file, as stored, via dicom-rs
@@ -282,33 +319,11 @@ pub(crate) async fn frames(
             "frames are stored as {media} ({ts}); transcoding is not supported"
         )));
     }
-    let mut file = Vec::new();
-    let mut stream: ByteStream = web
-        .host
-        .open_instance(&req.context, &location.instance)
-        .await?;
-    while let Some(chunk) = stream.next().await {
-        file.extend_from_slice(&chunk?);
-        if file.len() > MAX_FRAMES_FILE {
-            return Err(WebError::new(
-                StatusCode::PAYLOAD_TOO_LARGE,
-                "instance too large for frame retrieval",
-            ));
-        }
-    }
+    let file = read_instance(&web, &req, location).await?;
     let wanted = numbers.clone();
     let extracted = tokio::task::spawn_blocking(move || extract_frames(&file, &wanted))
         .await
-        .map_err(|e| WebError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
-        .map_err(|e| match e {
-            FrameError::NoPixelData => {
-                WebError::new(StatusCode::NOT_FOUND, "the instance has no pixel data")
-            }
-            FrameError::NoSuchFrame(n) => {
-                WebError::new(StatusCode::NOT_FOUND, format!("frame {n} does not exist"))
-            }
-            FrameError::Unreadable(e) => WebError::new(StatusCode::UNPROCESSABLE_ENTITY, e),
-        })?;
+        .map_err(|e| WebError::new(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))??;
     let mut parts = Vec::with_capacity(extracted.len());
     for frame in extracted {
         let content_type = if media == "application/octet-stream" {
