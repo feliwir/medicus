@@ -137,8 +137,7 @@ pub(crate) fn to_json(
         let Ok(element) = ds.element(tag) else {
             continue;
         };
-        let mut json = dicom_json::to_value(element).map_err(|e| invalid(format!("{tag}: {e}")))?;
-        conform(&mut json);
+        let json = dicom_json::to_value(element).map_err(|e| invalid(format!("{tag}: {e}")))?;
         out.insert(tag.json_key(), json);
     }
     Ok(out)
@@ -147,67 +146,9 @@ pub(crate) fn to_json(
 /// The whole data set `ds` as DICOM JSON.
 pub(crate) fn dataset_to_json(ds: &InMemDicomObject) -> Result<DicomJsonObject> {
     match dicom_json::to_value(ds) {
-        Ok(serde_json::Value::Object(mut map)) => {
-            map.values_mut().for_each(conform);
-            Ok(map)
-        }
+        Ok(serde_json::Value::Object(map)) => Ok(map),
         Ok(_) => Err(Error::internal("data set is not a JSON object")),
         Err(e) => Err(Error::internal(format!("cannot convert data set: {e}"))),
-    }
-}
-
-/// Brings one DICOM JSON attribute (and the items of a sequence) in line with PS3.18 F.2: AT
-/// values as eight uppercase hexadecimal digits (dicom-json writes `(gggg,eeee)`), IS and DS
-/// values as JSON numbers where they parse (others stay strings, as F.2.3 permits), and no
-/// `Value` at all for an empty attribute (F.2.5; dicom-json writes `"Value": []`).
-fn conform(attribute: &mut serde_json::Value) {
-    use serde_json::Value;
-    let vr = attribute
-        .get("vr")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_owned();
-    if attribute
-        .get("Value")
-        .and_then(Value::as_array)
-        .is_some_and(Vec::is_empty)
-        && let Some(object) = attribute.as_object_mut()
-    {
-        object.remove("Value");
-    }
-    let Some(Value::Array(values)) = attribute.get_mut("Value") else {
-        return;
-    };
-    for value in values {
-        match (vr.as_str(), &*value) {
-            ("SQ", Value::Object(item)) => {
-                let mut item = item.clone();
-                item.values_mut().for_each(conform);
-                *value = Value::Object(item);
-            }
-            ("AT", Value::String(s)) => {
-                let hex: String = s.chars().filter(char::is_ascii_hexdigit).collect();
-                if hex.len() == 8 {
-                    *value = Value::String(hex.to_ascii_uppercase());
-                }
-            }
-            ("IS", Value::String(s)) => {
-                if let Ok(n) = s.trim().trim_start_matches('+').parse::<i64>() {
-                    *value = Value::from(n);
-                }
-            }
-            ("DS", Value::String(s)) => {
-                if let Some(n) = s
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .and_then(serde_json::Number::from_f64)
-                {
-                    *value = Value::Number(n);
-                }
-            }
-            _ => {}
-        }
     }
 }
 
@@ -268,27 +209,6 @@ fn extract(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn json_follows_ps3_18_f_2_3() {
-        use serde_json::json;
-        let mut at = json!({ "vr": "AT", "Value": ["(0020,9056)"] });
-        conform(&mut at);
-        assert_eq!(at, json!({ "vr": "AT", "Value": ["00209056"] }));
-        let mut numbers = json!({ "vr": "DS", "Value": [" 0.5", "1e3", "garbage"] });
-        conform(&mut numbers);
-        assert_eq!(
-            numbers,
-            json!({ "vr": "DS", "Value": [0.5, 1000.0, "garbage"] })
-        );
-        let mut empty = json!({ "vr": "LO", "Value": [] });
-        conform(&mut empty);
-        assert_eq!(empty, json!({ "vr": "LO" }));
-        let mut seq =
-            json!({ "vr": "SQ", "Value": [{ "00200013": { "vr": "IS", "Value": ["+7"] } }] });
-        conform(&mut seq);
-        assert_eq!(seq["Value"][0]["00200013"]["Value"][0], json!(7));
-    }
     use dicom_core::VR;
     use dicom_dictionary_std::uids;
     use medicus_core::QueryLevel;

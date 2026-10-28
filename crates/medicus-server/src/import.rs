@@ -3,7 +3,6 @@
 
 use medicus_core::Partition;
 use std::collections::BTreeMap;
-use std::io::Read as _;
 use std::path::{Path, PathBuf};
 
 use futures::{StreamExt as _, TryStreamExt as _};
@@ -54,22 +53,29 @@ fn files_below(root: &Path) -> std::io::Result<Vec<PathBuf>> {
 
 /// Why a file is not imported, if it is not.
 fn skip_reason(path: &Path) -> Option<&'static str> {
-    let Ok(mut file) = std::fs::File::open(path) else {
-        return Some("unreadable");
-    };
-    let mut preamble = [0u8; 128];
-    if file.read_exact(&mut preamble).is_err() {
-        return Some("not a DICOM Part 10 file");
-    }
-    // The meta group (including the DICM prefix) is read by dicom-rs.
-    // A missing DICM prefix means "not DICOM"; a broken meta group after it is a corrupt file,
+    use dicom_object::meta::Error as MetaError;
+    use dicom_object::{OpenFileOptions, ReadError, file::ReadPreamble};
+    // dicom-rs reads the preamble and meta group and stops at the first data set element. No
+    // preamble or DICM prefix means "not DICOM"; anything broken after that is a corrupt file,
     // which the ingest pipeline reports as a failure.
-    match dicom_object::meta::FileMetaTable::from_reader(std::io::BufReader::new(file)) {
+    let opened = OpenFileOptions::new()
+        .read_preamble(ReadPreamble::Always)
+        // (0000,0000) is the lowest tag: stop before the first data set element.
+        .read_until(dicom_dictionary_std::tags::COMMAND_GROUP_LENGTH)
+        .open_file(path);
+    match opened {
+        Err(ReadError::OpenFile { .. }) => Some("unreadable"),
         Err(
-            dicom_object::meta::Error::NotDicom { .. }
-            | dicom_object::meta::Error::ReadMagicCode { .. },
+            ReadError::ReadPreambleBytes { .. }
+            | ReadError::ParseMetaDataSet {
+                source: MetaError::NotDicom { .. } | MetaError::ReadMagicCode { .. },
+                ..
+            },
         ) => Some("not a DICOM Part 10 file"),
-        Ok(meta) if meta.media_storage_sop_class_uid() == uids::MEDIA_STORAGE_DIRECTORY_STORAGE => {
+        Ok(file)
+            if file.meta().media_storage_sop_class_uid()
+                == uids::MEDIA_STORAGE_DIRECTORY_STORAGE =>
+        {
             Some("DICOMDIR")
         }
         Err(_) | Ok(_) => None,

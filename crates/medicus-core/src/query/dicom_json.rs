@@ -73,6 +73,7 @@ impl Attributes for Map<String, Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tags;
     use serde_json::json;
 
     #[test]
@@ -84,14 +85,14 @@ mod tests {
         });
         let d = DicomJson::new(v.as_object().unwrap());
         assert_eq!(
-            d.values(Tag(0x0010, 0x0010)).unwrap(),
+            d.values(tags::PATIENT_NAME).unwrap(),
             vec!["Yamada^Tarou=山田^太郎"]
         );
-        assert_eq!(d.values(Tag(0x0028, 0x0010)).unwrap(), vec!["512"]);
+        assert_eq!(d.values(tags::ROWS).unwrap(), vec!["512"]);
         assert_eq!(
-            d.values(Tag(0x0008, 0x1030)).unwrap(),
+            d.values(tags::STUDY_DESCRIPTION).unwrap(),
             Vec::<Cow<'_, str>>::new()
         );
-        assert!(d.values(Tag(0x0008, 0x0050)).is_none());
+        assert!(d.values(tags::ACCESSION_NUMBER).is_none());
     }
 }

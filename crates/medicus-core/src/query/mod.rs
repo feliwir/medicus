@@ -278,12 +278,12 @@ mod tests {
         let item = |code: &str, scheme: &str| {
             let o = MatchOptions::default();
             Query::new(QueryLevel::Study).with_key(Key {
-                tag: Tag(0x0008, 0x1032),
+                tag: tags::PROCEDURE_CODE_SEQUENCE,
                 vr: VR::SQ,
                 matcher: Matcher::Sequence {
                     keys: vec![
-                        Key::parse(Tag(0x0008, 0x0100), VR::SH, code, &o).unwrap(),
-                        Key::parse(Tag(0x0008, 0x0102), VR::SH, scheme, &o).unwrap(),
+                        Key::parse(tags::CODE_VALUE, VR::SH, code, &o).unwrap(),
+                        Key::parse(tags::CODING_SCHEME_DESIGNATOR, VR::SH, scheme, &o).unwrap(),
                     ],
                 },
             })

@@ -73,7 +73,13 @@ fn real_data() {
         let Ok(bytes) = std::fs::read(&path) else {
             continue;
         };
-        if bytes.len() < 132 || &bytes[128..132] != b"DICM" {
+        let is_part10 = dicom_object::OpenFileOptions::new()
+            .read_preamble(dicom_object::file::ReadPreamble::Always)
+            // (0000,0000) is the lowest tag: stop before the first data set element.
+            .read_until(dicom_dictionary_std::tags::COMMAND_GROUP_LENGTH)
+            .from_reader(&bytes[..])
+            .is_ok();
+        if !is_part10 {
             continue;
         }
         let key = match (incremental(&bytes), parse_prefix(&bytes, true, &[])) {

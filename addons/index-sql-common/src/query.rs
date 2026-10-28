@@ -441,7 +441,7 @@ mod tests {
     fn lower_level_keys_are_rejected_and_unknown_keys_reported() {
         let q = Query::new(QueryLevel::Study).with_key(key(tags::MODALITY, VR::CS, "CT"));
         assert!(compile(Dialect::Sqlite, &Partition::default_partition(), &q, &[]).is_err());
-        let other = Tag(0x0018, 0x0050);
+        let other = tags::SLICE_THICKNESS;
         let q = Query::new(QueryLevel::Instance).with_key(key(other, VR::DS, "1.5"));
         assert_eq!(
             compile(Dialect::Sqlite, &Partition::default_partition(), &q, &[])

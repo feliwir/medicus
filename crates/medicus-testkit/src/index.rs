@@ -743,11 +743,11 @@ async fn paging_and_order(index: &dyn IndexStore) {
 }
 
 async fn unfiltered_and_level_errors(index: &dyn IndexStore) {
-    let slice_thickness = Tag(0x0018, 0x0050);
+    let slice_thickness = tags::SLICE_THICKNESS;
     let mut q = Query::new(QueryLevel::Instance);
     q.keys
         .push(Key::parse(slice_thickness, VR::DS, "1.5", &MatchOptions::default()).unwrap());
-    q.keys.push(Key::universal(Tag(0x0028, 0x0010), VR::US));
+    q.keys.push(Key::universal(tags::ROWS, VR::US));
     assert_eq!(
         index.query(&part(), &q).await.unwrap().unfiltered,
         vec![slice_thickness]
@@ -869,36 +869,30 @@ pub fn with_attribute(mut r: InstanceRecord, tag: Tag, vr: VR, values: &[&str]) 
     r
 }
 
-const SLICE_THICKNESS: Tag = Tag(0x0018, 0x0050);
-const IMAGE_TYPE: Tag = Tag(0x0008, 0x0008);
-const ACQUISITION_DATE: Tag = Tag(0x0008, 0x0022);
-const PROTOCOL_NAME: Tag = Tag(0x0018, 0x1030);
-const OPERATORS_NAME: Tag = Tag(0x0008, 0x1070);
-
 fn extra_config() -> Vec<ExtraTag> {
     vec![
         ExtraTag {
-            tag: SLICE_THICKNESS,
+            tag: tags::SLICE_THICKNESS,
             vr: VR::DS,
             level: QueryLevel::Instance,
         },
         ExtraTag {
-            tag: IMAGE_TYPE,
+            tag: tags::IMAGE_TYPE,
             vr: VR::CS,
             level: QueryLevel::Instance,
         },
         ExtraTag {
-            tag: ACQUISITION_DATE,
+            tag: tags::ACQUISITION_DATE,
             vr: VR::DA,
             level: QueryLevel::Instance,
         },
         ExtraTag {
-            tag: PROTOCOL_NAME,
+            tag: tags::PROTOCOL_NAME,
             vr: VR::LO,
             level: QueryLevel::Series,
         },
         ExtraTag {
-            tag: OPERATORS_NAME,
+            tag: tags::OPERATORS_NAME,
             vr: VR::PN,
             level: QueryLevel::Series,
         },
@@ -921,7 +915,7 @@ pub async fn extra_tags_on_empty_index(index: &dyn IndexStore) {
     );
     let r = with_attribute(
         record("8.1", "8.1.1", "8.1.1.1", uids::CT_IMAGE_STORAGE, &[]),
-        SLICE_THICKNESS,
+        tags::SLICE_THICKNESS,
         VR::DS,
         &["2.5"],
     );
@@ -933,13 +927,13 @@ pub async fn extra_tags_on_empty_index(index: &dyn IndexStore) {
         )
         .await
         .unwrap();
-    let q = instance_query(&[(SLICE_THICKNESS, VR::DS, "2.50")]);
+    let q = instance_query(&[(tags::SLICE_THICKNESS, VR::DS, "2.50")]);
     let res = index.query(&part(), &q).await.unwrap();
     assert!(res.unfiltered.is_empty());
     assert_eq!(res.rows.len(), 1);
     // Extra tags are returned in their original DICOM JSON form.
     assert_eq!(
-        res.rows[0][&SLICE_THICKNESS.json_key()],
+        res.rows[0][&tags::SLICE_THICKNESS.json_key()],
         json!({ "vr": "DS", "Value": [2.5] })
     );
 }
@@ -966,17 +960,17 @@ async fn extra_tags(index: &dyn IndexStore) {
         status.iter().all(|s| s.state == ExtraTagState::Backfilling),
         "{status:?}"
     );
-    let q = instance_query(&[(SLICE_THICKNESS, VR::DS, "1.5")]);
+    let q = instance_query(&[(tags::SLICE_THICKNESS, VR::DS, "1.5")]);
     assert_eq!(
         index.query(&part(), &q).await.unwrap().unfiltered,
-        vec![SLICE_THICKNESS]
+        vec![tags::SLICE_THICKNESS]
     );
     for t in extra_config() {
         index.mark_extra_ready(t.tag).await.unwrap();
     }
     assert_eq!(
         index
-            .mark_extra_ready(Tag(0x0011, 0x0011))
+            .mark_extra_ready(tags::CONTRAST_BOLUS_AGENT)
             .await
             .unwrap_err()
             .kind,
@@ -1000,11 +994,11 @@ async fn extra_tags(index: &dyn IndexStore) {
             uids::CT_IMAGE_STORAGE,
             &[(tags::PATIENT_ID, "X7")],
         );
-        let r = with_attribute(r, SLICE_THICKNESS, VR::DS, &[thick]);
-        let r = with_attribute(r, IMAGE_TYPE, VR::CS, types);
-        let r = with_attribute(r, ACQUISITION_DATE, VR::DA, &[date]);
-        let r = with_attribute(r, PROTOCOL_NAME, VR::LO, &[protocol]);
-        with_attribute(r, OPERATORS_NAME, VR::PN, &[op])
+        let r = with_attribute(r, tags::SLICE_THICKNESS, VR::DS, &[thick]);
+        let r = with_attribute(r, tags::IMAGE_TYPE, VR::CS, types);
+        let r = with_attribute(r, tags::ACQUISITION_DATE, VR::DA, &[date]);
+        let r = with_attribute(r, tags::PROTOCOL_NAME, VR::LO, &[protocol]);
+        with_attribute(r, tags::OPERATORS_NAME, VR::PN, &[op])
     };
     let records = vec![
         mk(
@@ -1047,20 +1041,20 @@ async fn extra_tags(index: &dyn IndexStore) {
     }
 
     let queries: Vec<Vec<(Tag, VR, &str)>> = vec![
-        vec![(SLICE_THICKNESS, VR::DS, "1.5")],
-        vec![(SLICE_THICKNESS, VR::DS, "5.0")],
-        vec![(IMAGE_TYPE, VR::CS, "PRIMARY")],
-        vec![(IMAGE_TYPE, VR::CS, "LOCALIZER\\AXIAL")],
-        vec![(IMAGE_TYPE, VR::CS, "*ARY")],
-        vec![(ACQUISITION_DATE, VR::DA, "20240101-")],
-        vec![(ACQUISITION_DATE, VR::DA, "-20231231")],
-        vec![(PROTOCOL_NAME, VR::LO, "Chest*")],
-        vec![(PROTOCOL_NAME, VR::LO, "*[low dose]")],
-        vec![(OPERATORS_NAME, VR::PN, "smith^anna")],
-        vec![(OPERATORS_NAME, VR::PN, "B*")],
+        vec![(tags::SLICE_THICKNESS, VR::DS, "1.5")],
+        vec![(tags::SLICE_THICKNESS, VR::DS, "5.0")],
+        vec![(tags::IMAGE_TYPE, VR::CS, "PRIMARY")],
+        vec![(tags::IMAGE_TYPE, VR::CS, "LOCALIZER\\AXIAL")],
+        vec![(tags::IMAGE_TYPE, VR::CS, "*ARY")],
+        vec![(tags::ACQUISITION_DATE, VR::DA, "20240101-")],
+        vec![(tags::ACQUISITION_DATE, VR::DA, "-20231231")],
+        vec![(tags::PROTOCOL_NAME, VR::LO, "Chest*")],
+        vec![(tags::PROTOCOL_NAME, VR::LO, "*[low dose]")],
+        vec![(tags::OPERATORS_NAME, VR::PN, "smith^anna")],
+        vec![(tags::OPERATORS_NAME, VR::PN, "B*")],
         vec![
-            (SLICE_THICKNESS, VR::DS, "1.5"),
-            (IMAGE_TYPE, VR::CS, "DERIVED"),
+            (tags::SLICE_THICKNESS, VR::DS, "1.5"),
+            (tags::IMAGE_TYPE, VR::CS, "DERIVED"),
         ],
     ];
     let instances = records
@@ -1110,8 +1104,15 @@ async fn extra_tags(index: &dyn IndexStore) {
 
     // Series-level extra tags are usable at series level; instance-level ones are not.
     let mut sq = Query::new(QueryLevel::Series);
-    sq.keys
-        .push(Key::parse(PROTOCOL_NAME, VR::LO, "Scout*", &MatchOptions::default()).unwrap());
+    sq.keys.push(
+        Key::parse(
+            tags::PROTOCOL_NAME,
+            VR::LO,
+            "Scout*",
+            &MatchOptions::default(),
+        )
+        .unwrap(),
+    );
     let rows = index.query(&part(), &sq).await.unwrap().rows;
     assert_eq!(
         rows.iter()
@@ -1121,7 +1122,7 @@ async fn extra_tags(index: &dyn IndexStore) {
     );
     let mut bad = Query::new(QueryLevel::Series);
     bad.keys
-        .push(Key::parse(SLICE_THICKNESS, VR::DS, "1", &MatchOptions::default()).unwrap());
+        .push(Key::parse(tags::SLICE_THICKNESS, VR::DS, "1", &MatchOptions::default()).unwrap());
     assert_eq!(
         index.query(&part(), &bad).await.unwrap_err().kind,
         ErrorKind::InvalidArgument
@@ -1131,14 +1132,17 @@ async fn extra_tags(index: &dyn IndexStore) {
     let old = SopInstanceUid::parse("2.1.1.1").unwrap();
     let attrs = with_attribute(
         record("2.1", "2.1.1", "2.1.1.1", uids::CT_IMAGE_STORAGE, &[]),
-        SLICE_THICKNESS,
+        tags::SLICE_THICKNESS,
         VR::DS,
         &["9"],
     )
     .attributes;
     index.update_extra(&part(), &old, &attrs).await.unwrap();
     let rows = index
-        .query(&part(), &instance_query(&[(SLICE_THICKNESS, VR::DS, "9")]))
+        .query(
+            &part(),
+            &instance_query(&[(tags::SLICE_THICKNESS, VR::DS, "9")]),
+        )
         .await
         .unwrap()
         .rows;
@@ -1171,14 +1175,14 @@ async fn extra_tags(index: &dyn IndexStore) {
     );
     let row = &index.query(&part(), &one).await.unwrap().rows[0];
     assert_eq!(
-        row[&IMAGE_TYPE.json_key()]["Value"],
+        row[&tags::IMAGE_TYPE.json_key()]["Value"],
         json!(["ORIGINAL", "PRIMARY", "LOCALIZER"])
     );
     assert_eq!(
-        row[&OPERATORS_NAME.json_key()]["Value"][0]["Alphabetic"],
+        row[&tags::OPERATORS_NAME.json_key()]["Value"][0]["Alphabetic"],
         "Brown^Bob"
     );
-    assert_eq!(row[&PROTOCOL_NAME.json_key()]["vr"], "LO");
+    assert_eq!(row[&tags::PROTOCOL_NAME.json_key()]["vr"], "LO");
 
     // Removing a tag from the configuration makes queries on it unfiltered again.
     index
@@ -1187,11 +1191,11 @@ async fn extra_tags(index: &dyn IndexStore) {
         .unwrap();
     assert_eq!(
         index.query(&part(), &q).await.unwrap().unfiltered,
-        vec![SLICE_THICKNESS]
+        vec![tags::SLICE_THICKNESS]
     );
     let row = &index.query(&part(), &one).await.unwrap().rows[0];
     assert!(
-        !row.contains_key(&SLICE_THICKNESS.json_key()),
+        !row.contains_key(&tags::SLICE_THICKNESS.json_key()),
         "dropped tags are not returned"
     );
 }

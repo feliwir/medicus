@@ -912,9 +912,11 @@ fn part10_prefix(request: &StoreRequest, calling_ae: &str) -> Result<Bytes, Erro
     let meta = meta
         .build()
         .map_err(|e| Error::Protocol(format!("cannot build file meta information: {e}")))?;
-    let mut out = vec![0u8; 128];
-    out.extend_from_slice(b"DICM");
-    meta.write(&mut out)
+    // A file object with an empty data set encodes as exactly the preamble, magic code and
+    // meta group; the received data set streams after it.
+    let mut out = Vec::new();
+    dicom_object::FileDicomObject::new_empty_with_meta(meta)
+        .write_all(&mut out)
         .map_err(|e| Error::Protocol(format!("cannot write file meta information: {e}")))?;
     Ok(Bytes::from(out))
 }

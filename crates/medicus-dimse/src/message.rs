@@ -155,19 +155,31 @@ where
     }
 }
 
+/// Where the data set of a Part 10 file with meta group `meta` starts. dicom-rs does not report
+/// this offset (its reader is buffered), but it reads the meta group by its group length:
+/// preamble and magic code (132 bytes), the File Meta Information Group Length element (12 bytes)
+/// and the `information_group_length` bytes of the group.
+fn data_set_offset(meta: &FileMetaTable) -> usize {
+    132 + 12 + meta.information_group_length as usize
+}
+
 /// Splits a Part 10 file into its File Meta Information and a stream of its data set, using
-/// dicom-rs to read the meta group.
+/// dicom-rs to read the preamble and meta group.
 pub(crate) async fn split_part10(
     mut file: ByteStream,
 ) -> Result<(FileMetaTable, ByteStream), Error> {
     let mut buffer = BytesMut::new();
     loop {
-        if buffer.len() > 128 {
-            // dicom-rs reads exactly the meta group (by its group length), as ingest did, so
-            // the data set starts where it stopped.
-            let mut cursor = std::io::Cursor::new(&buffer[128..]);
-            if let Ok(meta) = FileMetaTable::from_reader(&mut cursor) {
-                let start = 128 + usize::try_from(cursor.position()).unwrap_or(usize::MAX);
+        // Read the preamble and meta group, and stop at the first data set element.
+        let opened = dicom_object::OpenFileOptions::new()
+            .read_preamble(dicom_object::file::ReadPreamble::Always)
+            // (0000,0000) is the lowest tag: stop before the first data set element.
+            .read_until(dicom_dictionary_std::tags::COMMAND_GROUP_LENGTH)
+            .from_reader(&buffer[..]);
+        if let Ok(file_object) = opened {
+            let meta = file_object.meta().clone();
+            let start = data_set_offset(&meta);
+            if buffer.len() >= start {
                 let rest = Bytes::from(buffer.split_off(start));
                 let data: ByteStream =
                     Box::pin(futures::stream::once(async move { Ok(rest) }).chain(file));

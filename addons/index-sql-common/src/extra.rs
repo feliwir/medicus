@@ -292,10 +292,10 @@ mod tests {
             vr,
             level: QueryLevel::Instance,
         };
-        assert!(validate(&[t(Tag(0x0018, 0x0050), VR::DS)]).is_ok());
+        assert!(validate(&[t(tags::SLICE_THICKNESS, VR::DS)]).is_ok());
         assert!(validate(&[t(tags::MODALITY, VR::CS)]).is_err());
-        assert!(validate(&[t(Tag(0x0040, 0x0275), VR::SQ)]).is_err());
-        let dup = t(Tag(0x0018, 0x0050), VR::DS);
+        assert!(validate(&[t(tags::REQUEST_ATTRIBUTES_SEQUENCE, VR::SQ)]).is_err());
+        let dup = t(tags::SLICE_THICKNESS, VR::DS);
         assert!(validate(&[dup, dup]).is_err());
     }
 }
