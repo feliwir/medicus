@@ -12,7 +12,8 @@ name = "medicus"
 path = "src/main.rs"
 
 [features]
-default = ["builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse", "builtin-dicomweb", "builtin-events-webhook"]
+default = ["builtin-admin-ui", "builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse", "builtin-dicomweb", "builtin-events-webhook"]
+builtin-admin-ui = ["dep:admin-ui"]
 builtin-storage-fs = ["dep:storage-fs"]
 builtin-index-sqlite = ["dep:index-sqlite"]
 builtin-dimse = ["dep:dimse"]
@@ -20,8 +21,15 @@ builtin-dicomweb = ["dep:dicomweb"]
 builtin-events-webhook = ["dep:events-webhook"]
 
 [dependencies]
+arc-swap.workspace = true
+argon2.workspace = true
+getrandom.workspace = true
+jsonschema.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+rpassword.workspace = true
 medicus-core.workspace = true
 medicus-host.workspace = true
+admin-ui = { path = "../../addons/admin-ui", optional = true }
 dicomweb = { path = "../../addons/dicomweb", optional = true }
 dimse = { path = "../../addons/dimse", optional = true }
 events-webhook = { path = "../../addons/events-webhook", optional = true }
@@ -45,6 +53,7 @@ dicom-object.workspace = true
 dicom-transfer-syntax-registry.workspace = true
 clap.workspace = true
 figment.workspace = true
+toml.workspace = true
 serde = { workspace = true, features = ["rc"] }
 serde_json.workspace = true
 thiserror.workspace = true
@@ -56,11 +65,11 @@ time.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+example-c = { path = "../../addons/example-c" }
 medicus-dimse.workspace = true
 http-body-util = "0.1"
 mime = "0.3"
 multer = "3"
-reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
 tower = { version = "0.5", features = ["util"] }
 medicus-testkit.workspace = true
 figment = { workspace = true, features = ["test"] }

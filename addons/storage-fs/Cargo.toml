@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+schemars.workspace = true
 medicus-addon-sdk.workspace = true
 medicus-core.workspace = true
 

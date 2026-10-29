@@ -6,10 +6,10 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 use medicus_abi::bridge::{CompletionGuard, StreamCompletionGuard, export_stream, import_stream};
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_REMOTE_NODE,
-    MD_CAP_SERVICE, MD_INVALID_ARGUMENT, MD_LOG_DEBUG, MD_LOG_ERROR, MD_LOG_INFO, MD_LOG_WARN,
-    MD_OK, MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer, MdCancel, MdCompletion, MdHostApi,
-    MdReadStream, MdStatus, MdStr, MdStreamCompletion,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_HTTP_ROUTES, MD_CAP_INDEX_STORE,
+    MD_CAP_REMOTE_NODE, MD_CAP_SERVICE, MD_INVALID_ARGUMENT, MD_LOG_DEBUG, MD_LOG_ERROR,
+    MD_LOG_INFO, MD_LOG_WARN, MD_OK, MD_REJECTED, MD_UNAVAILABLE, MD_UNSUPPORTED, MdBuffer,
+    MdCancel, MdCompletion, MdHostApi, MdReadStream, MdStatus, MdStr, MdStreamCompletion,
 };
 use medicus_core::capability::index::ResourceUid;
 use medicus_core::capability::{HostServices, JobKind, JobProgress};
@@ -38,6 +38,8 @@ unsafe impl Send for RawRegistration {}
 pub(crate) struct HostCtx {
     pub addon: String,
     pub config: Vec<u8>,
+    /// The `MD_CAP_*` kinds the manifest declares; registering others is refused.
+    pub provides: Vec<u32>,
     pub registrations: Mutex<Vec<RawRegistration>>,
     /// Set after `medicus_addon_init` returned; later registrations are refused.
     pub sealed: AtomicBool,
@@ -51,12 +53,14 @@ pub(crate) struct HostCtx {
 pub(crate) fn new_host_api(
     addon: &str,
     config: &serde_json::Value,
+    provides: Vec<u32>,
     services: ServicesSlot,
     rt: Handle,
 ) -> (&'static HostCtx, &'static MdHostApi) {
     let ctx: &'static HostCtx = Box::leak(Box::new(HostCtx {
         addon: addon.to_owned(),
         config: serde_json::to_vec(config).unwrap_or_else(|_| b"null".to_vec()),
+        provides,
         registrations: Mutex::new(Vec::new()),
         sealed: AtomicBool::new(false),
         services,
@@ -132,9 +136,18 @@ unsafe extern "C" fn host_register_capability(
             | MD_CAP_INDEX_STORE
             | MD_CAP_SERVICE
             | MD_CAP_REMOTE_NODE
+            | MD_CAP_HTTP_ROUTES
     ) {
         tracing::warn!(addon = %ctx.addon, kind, "unsupported capability kind; refused");
         return MD_UNSUPPORTED;
+    }
+    if !ctx.provides.contains(&kind) {
+        tracing::warn!(
+            addon = %ctx.addon,
+            kind,
+            "capability kind not declared in the manifest's `provides`; refused"
+        );
+        return MD_REJECTED;
     }
     let Ok(name) = name else {
         return MD_INVALID_ARGUMENT;
@@ -222,6 +235,12 @@ enum Call {
     Nodes,
     Peers,
     JobProgress(JobProgressRequest),
+    Authenticate(AuthenticateRequest),
+}
+
+#[derive(serde::Deserialize)]
+struct AuthenticateRequest {
+    secret: String,
 }
 
 #[derive(serde::Deserialize)]
@@ -284,6 +303,7 @@ impl Call {
             b"nodes" => Ok(Self::Nodes),
             b"peers" => Ok(Self::Peers),
             b"job_progress" => parse("job progress", request).map(Self::JobProgress),
+            b"authenticate" => parse("authenticate request", request).map(Self::Authenticate),
             other => Err(Error::unsupported(format!(
                 "unknown host method {:?}",
                 String::from_utf8_lossy(other)
@@ -309,6 +329,7 @@ impl Call {
             Self::Nodes => to_buffer(&services.nodes().await?),
             Self::Peers => to_buffer(&services.peers().await?),
             Self::JobProgress(r) => to_buffer(&services.job_progress(r.job, r.progress).await?),
+            Self::Authenticate(r) => to_buffer(&services.authenticate(&r.secret).await?),
         }
     }
 }

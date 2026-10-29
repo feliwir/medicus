@@ -29,17 +29,20 @@ that hard-codes rich structures accumulates parallel versions of the same interf
   unions, variadics, Rust enums with data, and callee-unwinding.
 - Libraries `abi_stable` (unmaintained since 2023) and `stabby` (Rust-only) were rejected.
 
-### 2. Two-step, version-checked entry
-Every addon exports exactly two symbols, whose names never change:
+### 2. Version-checked entry
+Every addon exports these symbols, whose names never change:
 ```c
-uint32_t           medicus_addon_abi_version(void);           /* (major << 16) | minor */
-const MdAddonInfo *medicus_addon_init(const MdHostApi *host);  /* NULL = failed, see host log */
+uint32_t medicus_addon_abi_version(void);           /* (major << 16) | minor */
+MdStr    medicus_addon_manifest(void);              /* JSON manifest, since ABI 0.7 (ADR-0004) */
+MdStatus medicus_addon_init(const MdHostApi *host); /* MD_OK, or failed (see host log) */
 ```
 - The host calls `medicus_addon_abi_version` first and only proceeds when the major versions are
   equal and the addon's minor version is not newer than the host's. No other struct is exchanged
   before this check.
-- `MdAddonInfo` carries the name, the version (UTF-8) and the target triple. The host rejects a
-  mismatching target triple.
+- The manifest (JSON) carries the name, the version, the target triple, the capability kinds the
+  addon provides and requires, and whether it is required (ADR-0004 §2). The host reads it before
+  initialization and rejects a mismatching target triple. Until ABI 0.7, `medicus_addon_init`
+  returned an `MdAddonInfo` with name, version and target instead.
 - While the major version is `0`, every minor bump may break compatibility (semver 0.x rules).
 
 ### 3. Evolving structs are size-prefixed
@@ -80,7 +83,7 @@ int32_t status, MdBuffer result); }` and returns immediately.
 ### 7. Errors, panics and threads
 - `int32_t` status codes (`MD_OK = 0`, `MD_INVALID_ARGUMENT`, `MD_NOT_FOUND`, `MD_ALREADY_EXISTS`,
   `MD_REJECTED`, `MD_RESOURCE_EXHAUSTED`, `MD_UNAVAILABLE`, `MD_CANCELLED`, `MD_UNSUPPORTED`,
-  `MD_INTERNAL`, `MD_PANICKED`). A failing completion's `result` buffer may carry a UTF-8 message.
+  `MD_INTERNAL`, `MD_PANICKED`, `MD_PERMISSION_DENIED`, `MD_CONFLICT`). A failing completion's `result` buffer may carry a UTF-8 message.
 - **No unwinding across the boundary.** The Rust SDK wraps every entry point in `catch_unwind` and
   reports `MD_PANICKED`. The host then marks the addon unhealthy (`addon.unhealthy` event). The host
   guards its own callbacks the same way.

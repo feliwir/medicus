@@ -5,15 +5,16 @@
 //! config = { kinds = ["instance.stored", "study.stable"] }   # optional; default: all events
 //! ```
 
-use medicus_addon_sdk::{Registrar, async_trait, export_addon};
+use medicus_addon_sdk::{AddonManifest, Capability, Registrar, async_trait, export_addon};
 use medicus_core::Result;
 use medicus_core::capability::{EventFilter, EventHook};
 use medicus_core::event::{Event, EventKind};
 use serde::Deserialize;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
+    #[schemars(with = "Vec<String>")]
     kinds: Vec<EventKind>,
 }
 
@@ -53,7 +54,8 @@ fn init(reg: &mut Registrar) -> Result<()> {
 }
 
 export_addon!(
-    name = "example-hooks",
-    version = env!("CARGO_PKG_VERSION"),
+    manifest = AddonManifest::new("example-hooks", env!("CARGO_PKG_VERSION"))
+        .provides([Capability::EventHook])
+        .config_schema(medicus_addon_sdk::config_schema::<Config>()),
     init = init
 );

@@ -11,6 +11,8 @@ pub enum ErrorKind {
     InvalidArgument,
     NotFound,
     AlreadyExists,
+    /// The state changed since the caller read it (e.g. a stale revision); re-read and retry.
+    Conflict,
     /// Refused by policy (e.g. an ingest filter).
     Rejected,
     /// The caller lacks the permission for the operation on the node (ADR-0003).
@@ -32,6 +34,7 @@ impl ErrorKind {
             Self::InvalidArgument => "invalid argument",
             Self::NotFound => "not found",
             Self::AlreadyExists => "already exists",
+            Self::Conflict => "conflict",
             Self::Rejected => "rejected",
             Self::PermissionDenied => "permission denied",
             Self::ResourceExhausted => "resource exhausted",
@@ -80,6 +83,10 @@ impl Error {
 
     pub fn internal(message: impl Into<String>) -> Self {
         Self::new(ErrorKind::Internal, message)
+    }
+
+    pub fn conflict(message: impl Into<String>) -> Self {
+        Self::new(ErrorKind::Conflict, message)
     }
 
     pub fn unsupported(message: impl Into<String>) -> Self {

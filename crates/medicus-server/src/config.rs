@@ -1,5 +1,10 @@
 //! Server configuration: a TOML file layered with `MEDICUS_*` environment variables.
 //!
+//! The configuration bootstraps the server: `server.data_dir`, `http`, `log`, `archive.index`, the
+//! addon libraries (`library`, `sha256`, `search_paths`) and the index addon's entry are read on
+//! every start. All other sections are settings ([`crate::settings`]): they are imported into the
+//! index on the first start and ignored afterwards.
+//!
 //! Nested keys use `__` in environment variables, e.g. `MEDICUS_HTTP__LISTEN=0.0.0.0:8042`.
 //! Unknown keys are rejected so that typos do not silently fall back to defaults.
 
@@ -290,7 +295,9 @@ impl Default for LogConfig {
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 #[serde(default)]
 pub struct AddonsConfig {
-    /// Directories searched for addon manifests (`<name>.addon.toml`).
+    /// Directories searched for addon manifest files (`<name>.addon.toml`, written by `medicus
+    /// addon manifest`): the addons they describe can be enabled by name, without `library`, and
+    /// are not loaded unless enabled or needed. Relative `library` paths are resolved here too.
     pub search_paths: Vec<PathBuf>,
     /// Per-addon settings, keyed by addon name.
     #[serde(flatten)]

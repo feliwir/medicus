@@ -12,11 +12,15 @@ use bytes::Bytes;
 use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 
+pub mod admin;
 pub mod host;
+pub mod http;
 pub mod index;
 pub mod job;
 
+pub use admin::{Credential, CredentialKind, SettingsRevision, User};
 pub use host::{Endpoint, HostServices, Ingested, Peer, Service};
+pub use http::{HttpRequest, HttpResponse, HttpResponseHead, HttpRoutes};
 pub use index::IndexStore;
 pub use job::{Job, JobKind, JobProgress, JobState, RemoteNode, RemoteRequest, SendOutcome};
 
@@ -36,6 +40,7 @@ pub enum CapabilityKind {
     IndexStore,
     Service,
     RemoteNode,
+    HttpRoutes,
 }
 
 /// Metadata of a stored blob.

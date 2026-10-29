@@ -8,8 +8,8 @@ use medicus_abi::bridge::{
     Completion, OwnedBuffer, StreamCompletion, completion, export_stream, stream_completion,
 };
 use medicus_abi::ffi::{
-    MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdIndexStoreVtable, MdRange,
-    MdRemoteNodeVtable, MdServiceVtable, MdStr,
+    MdBlobStoreVtable, MdCancel, MdEventHookVtable, MdHttpRoutesVtable, MdIndexStoreVtable,
+    MdRange, MdRemoteNodeVtable, MdServiceVtable, MdStr,
 };
 use medicus_core::capability::index::{
     DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagStatus, IndexRequest,
@@ -19,7 +19,8 @@ use medicus_core::capability::{
     BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, StorageUsage,
 };
 use medicus_core::capability::{
-    IndexStore, Job, JobState, Peer, RemoteNode, RemoteRequest, SendOutcome, Service,
+    Credential, IndexStore, Job, JobState, Peer, RemoteNode, RemoteRequest, SendOutcome, Service,
+    SettingsRevision, User,
 };
 use medicus_core::event::Event;
 use medicus_core::query::Query;
@@ -386,6 +387,80 @@ impl IndexStore for FfiIndexStore {
     async fn claim_job(&self, now: time::OffsetDateTime) -> Result<Option<Job>> {
         self.call(IndexRequest::ClaimJob { now }).await
     }
+
+    async fn settings_current(&self) -> Result<Option<SettingsRevision>> {
+        self.call(IndexRequest::SettingsCurrent).await
+    }
+
+    async fn settings_revision(&self, revision: u64) -> Result<Option<SettingsRevision>> {
+        self.call(IndexRequest::SettingsRevision { revision }).await
+    }
+
+    async fn settings_history(&self, limit: u32, offset: u64) -> Result<Vec<SettingsRevision>> {
+        self.call(IndexRequest::SettingsHistory { limit, offset })
+            .await
+    }
+
+    async fn put_settings(&self, revision: &SettingsRevision) -> Result<()> {
+        self.call(IndexRequest::PutSettings {
+            revision: Box::new(revision.clone()),
+        })
+        .await
+    }
+
+    async fn create_user(&self, user: &User) -> Result<()> {
+        self.call(IndexRequest::CreateUser {
+            user: Box::new(user.clone()),
+        })
+        .await
+    }
+
+    async fn update_user(&self, user: &User) -> Result<()> {
+        self.call(IndexRequest::UpdateUser {
+            user: Box::new(user.clone()),
+        })
+        .await
+    }
+
+    async fn get_user(&self, name: &str) -> Result<Option<User>> {
+        self.call(IndexRequest::GetUser { name: name.into() }).await
+    }
+
+    async fn list_users(&self) -> Result<Vec<User>> {
+        self.call(IndexRequest::ListUsers).await
+    }
+
+    async fn delete_user(&self, name: &str) -> Result<()> {
+        self.call(IndexRequest::DeleteUser { name: name.into() })
+            .await
+    }
+
+    async fn put_credential(&self, credential: &Credential) -> Result<()> {
+        self.call(IndexRequest::PutCredential {
+            credential: Box::new(credential.clone()),
+        })
+        .await
+    }
+
+    async fn find_credential(&self, secret_hash: &str) -> Result<Option<Credential>> {
+        self.call(IndexRequest::FindCredential {
+            secret_hash: secret_hash.into(),
+        })
+        .await
+    }
+
+    async fn list_credentials(&self, user: &str) -> Result<Vec<Credential>> {
+        self.call(IndexRequest::ListCredentials { user: user.into() })
+            .await
+    }
+
+    async fn delete_credential(&self, id: uuid::Uuid) -> Result<()> {
+        self.call(IndexRequest::DeleteCredential { id }).await
+    }
+
+    async fn prune_credentials(&self, now: time::OffsetDateTime) -> Result<u64> {
+        self.call(IndexRequest::PruneCredentials { now }).await
+    }
 }
 
 impl Drop for FfiIndexStore {
@@ -495,6 +570,54 @@ impl Service for FfiService {
 impl Drop for FfiService {
     fn drop(&mut self) {
         tracing::debug!(addon = %self.addon, "destroying service");
+        // SAFETY: as for `FfiBlobStore`.
+        unsafe { (self.vtable.destroy)(self.instance) };
+    }
+}
+
+/// `HttpRoutes` implemented by an addon.
+pub(crate) struct FfiHttpRoutes {
+    pub addon: String,
+    pub vtable: &'static MdHttpRoutesVtable,
+    pub instance: *mut c_void,
+}
+
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Send for FfiHttpRoutes {}
+// SAFETY: as for `FfiBlobStore`.
+unsafe impl Sync for FfiHttpRoutes {}
+
+#[async_trait]
+impl medicus_core::capability::HttpRoutes for FfiHttpRoutes {
+    async fn handle(
+        &self,
+        request: medicus_core::capability::HttpRequest,
+        body: bytes::Bytes,
+    ) -> Result<medicus_core::capability::HttpResponse> {
+        let json = serde_json::to_vec(&request).map_err(|e| Error::internal(e.to_string()))?;
+        let (done, fut) = stream_completion();
+        // SAFETY: live instance; `json` and `body` outlive the call (the addon copies them).
+        unsafe {
+            (self.vtable.handle)(
+                self.instance,
+                MdStr::from_bytes(&json),
+                MdStr::from_bytes(&body),
+                MdCancel::none(),
+                done,
+            );
+        };
+        drop((json, body));
+        let (head, body) = fut.with_data().await?;
+        Ok(medicus_core::capability::HttpResponse {
+            head: from_json(&head)?,
+            body,
+        })
+    }
+}
+
+impl Drop for FfiHttpRoutes {
+    fn drop(&mut self) {
+        tracing::debug!(addon = %self.addon, "destroying HTTP routes");
         // SAFETY: as for `FfiBlobStore`.
         unsafe { (self.vtable.destroy)(self.instance) };
     }

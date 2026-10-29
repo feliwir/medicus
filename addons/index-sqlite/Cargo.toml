@@ -7,6 +7,7 @@ rust-version.workspace = true
 license.workspace = true
 
 [dependencies]
+schemars.workspace = true
 index-sql-common = { path = "../index-sql-common" }
 medicus-addon-sdk.workspace = true
 medicus-core.workspace = true

@@ -111,6 +111,11 @@ pub trait HostServices: Send + Sync + 'static {
     /// The configured peers.
     async fn peers(&self) -> Result<Vec<Peer>>;
 
+    /// The user a session or API token secret belongs to (ABI 0.7), for protocol addons that
+    /// accept the server's own credentials: the name can then be given as the principal of the
+    /// call context. `None` if the secret is unknown or expired, or the user is disabled.
+    async fn authenticate(&self, secret: &str) -> Result<Option<String>>;
+
     /// Queues a job, e.g. a send requested through a protocol front-end (needs `send`).
     async fn submit_job(&self, context: &CallContext, kind: JobKind) -> Result<Job>;
 

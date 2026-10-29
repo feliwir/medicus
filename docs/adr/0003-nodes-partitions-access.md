@@ -75,7 +75,8 @@ remote destination must be a peer the principal may send to. Deletion is not a u
 v1: it happens through eviction and retention (§3.10).
 
 Admin permissions are separate and also node- or partition-scoped: `admin.events`, `admin.jobs`
-(read/cancel), `admin.peers` (list/echo) and `admin.system`.
+(read/cancel), `admin.peers` (list/echo) and `admin.system`. (ADR-0004 adds `admin.users` and,
+for now, grants admin permissions only on all nodes, `*`.)
 
 ### 4. Principals and roles (v1: configuration)
 

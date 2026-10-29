@@ -1,5 +1,5 @@
-//! The index: hierarchy, query keys, blob locations, the event outbox, subscriber cursors and
-//! jobs.
+//! The index: hierarchy, query keys, blob locations, the event outbox, subscriber cursors, jobs,
+//! and the server's settings, users and credentials.
 //!
 //! The index is the single source of truth for what is stored. Everything that changes data also
 //! appends the corresponding event in the same transaction (PLAN §3.7), so subscribers never miss
@@ -8,6 +8,7 @@
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
+use crate::capability::admin::{Credential, SettingsRevision, User};
 use crate::capability::job::{Job, JobState};
 use crate::error::Result;
 use crate::event::Event;
@@ -243,6 +244,49 @@ pub trait IndexStore: Send + Sync + 'static {
     /// Atomically takes the oldest queued job that is due at `now`: marks it `Running` and
     /// counts the attempt. Concurrent callers never get the same job.
     async fn claim_job(&self, now: time::OffsetDateTime) -> Result<Option<Job>>;
+
+    /// The latest settings revision; `None` before the first one was written.
+    async fn settings_current(&self) -> Result<Option<SettingsRevision>>;
+
+    async fn settings_revision(&self, revision: u64) -> Result<Option<SettingsRevision>>;
+
+    /// Settings revisions, newest first.
+    async fn settings_history(&self, limit: u32, offset: u64) -> Result<Vec<SettingsRevision>>;
+
+    /// Appends a settings revision. Its number must follow the latest one (1 for the first);
+    /// otherwise someone else wrote a revision since the caller read the settings, and the call
+    /// fails with `Conflict`.
+    async fn put_settings(&self, revision: &SettingsRevision) -> Result<()>;
+
+    /// `AlreadyExists` if a user with the name exists.
+    async fn create_user(&self, user: &User) -> Result<()>;
+
+    /// Replaces a user. `NotFound` if there is no user with the name.
+    async fn update_user(&self, user: &User) -> Result<()>;
+
+    async fn get_user(&self, name: &str) -> Result<Option<User>>;
+
+    /// All users, by name.
+    async fn list_users(&self) -> Result<Vec<User>>;
+
+    /// Deletes a user and their credentials. `NotFound` if there is no user with the name.
+    async fn delete_user(&self, name: &str) -> Result<()>;
+
+    /// Inserts or replaces a credential (by id). `NotFound` if its user does not exist;
+    /// `AlreadyExists` if another credential has the same secret hash.
+    async fn put_credential(&self, credential: &Credential) -> Result<()>;
+
+    /// The credential with the secret hash, expired or not.
+    async fn find_credential(&self, secret_hash: &str) -> Result<Option<Credential>>;
+
+    /// A user's credentials, oldest first.
+    async fn list_credentials(&self, user: &str) -> Result<Vec<Credential>>;
+
+    /// `NotFound` if there is no credential with the id.
+    async fn delete_credential(&self, id: uuid::Uuid) -> Result<()>;
+
+    /// Deletes the credentials that expired at `now`; returns how many were deleted.
+    async fn prune_credentials(&self, now: time::OffsetDateTime) -> Result<u64>;
 }
 
 /// Wire format of `IndexStore` calls over the ABI (one JSON request per call).
@@ -315,6 +359,47 @@ pub enum IndexRequest {
         #[serde(with = "time::serde::rfc3339")]
         now: time::OffsetDateTime,
     },
+    SettingsCurrent,
+    SettingsRevision {
+        revision: u64,
+    },
+    SettingsHistory {
+        limit: u32,
+        #[serde(default)]
+        offset: u64,
+    },
+    PutSettings {
+        revision: Box<SettingsRevision>,
+    },
+    CreateUser {
+        user: Box<User>,
+    },
+    UpdateUser {
+        user: Box<User>,
+    },
+    GetUser {
+        name: String,
+    },
+    ListUsers,
+    DeleteUser {
+        name: String,
+    },
+    PutCredential {
+        credential: Box<Credential>,
+    },
+    FindCredential {
+        secret_hash: String,
+    },
+    ListCredentials {
+        user: String,
+    },
+    DeleteCredential {
+        id: uuid::Uuid,
+    },
+    PruneCredentials {
+        #[serde(with = "time::serde::rfc3339")]
+        now: time::OffsetDateTime,
+    },
 }
 
 impl IndexRequest {
@@ -339,6 +424,20 @@ impl IndexRequest {
         "get_job",
         "list_jobs",
         "claim_job",
+        "settings_current",
+        "settings_revision",
+        "settings_history",
+        "put_settings",
+        "create_user",
+        "update_user",
+        "get_user",
+        "list_users",
+        "delete_user",
+        "put_credential",
+        "find_credential",
+        "list_credentials",
+        "delete_credential",
+        "prune_credentials",
     ];
 }
 

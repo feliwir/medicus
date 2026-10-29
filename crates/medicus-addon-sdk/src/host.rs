@@ -158,6 +158,11 @@ impl HostServices for Host {
         self.call("peers", &()).await
     }
 
+    async fn authenticate(&self, secret: &str) -> Result<Option<String>> {
+        self.call("authenticate", &json!({ "secret": secret }))
+            .await
+    }
+
     async fn submit_job(&self, context: &CallContext, kind: JobKind) -> Result<Job> {
         self.call("submit_job", &json!({ "context": context, "kind": kind }))
             .await

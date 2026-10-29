@@ -45,6 +45,9 @@ pub enum EventKind {
     PeerUnreachable,
     AddonUnhealthy,
     AccessDenied,
+    /// A new settings revision was stored (ADR-0004 §3); `detail` has the revision and the
+    /// sections that wait for a restart.
+    ConfigChanged,
     Other(String),
 }
 
@@ -69,11 +72,12 @@ const CORE_KINDS: &[(EventKind, &str)] = &[
     (EventKind::AccessDenied, "access.denied"),
     (EventKind::PeerUnreachable, "peer.unreachable"),
     (EventKind::AddonUnhealthy, "addon.unhealthy"),
+    (EventKind::ConfigChanged, "config.changed"),
 ];
 
 /// Namespaces reserved for kinds emitted by the core; addons cannot publish into them.
 const RESERVED_NAMESPACES: &[&str] = &[
-    "instance", "series", "study", "patient", "storage", "job", "peer", "addon",
+    "instance", "series", "study", "patient", "storage", "job", "peer", "addon", "config",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

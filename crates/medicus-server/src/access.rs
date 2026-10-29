@@ -18,6 +18,10 @@ use crate::config::{Config, GrantConfig, NodeConfig};
 /// The node of a zero-configuration archive.
 pub(crate) const DEFAULT_NODE: &str = "MEDICUS";
 
+/// The built-in role that grants every permission on every node and on the server. The settings
+/// cannot define a role of this name.
+pub(crate) const ADMIN_ROLE: &str = "admin";
+
 /// What stands behind a node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Backend {
@@ -68,7 +72,13 @@ struct Principal {
 pub(crate) enum Caller<'a> {
     /// The core itself (imports, internal components, verified job executors).
     System,
+    /// A principal of the settings (e.g. a DIMSE peer).
     Principal(&'a str),
+    /// A user account, with its roles.
+    User {
+        name: String,
+        roles: Vec<String>,
+    },
     Anonymous,
 }
 
@@ -77,6 +87,7 @@ impl std::fmt::Display for Caller<'_> {
         match self {
             Self::System => f.write_str("system"),
             Self::Principal(name) => write!(f, "principal {name:?}"),
+            Self::User { name, .. } => write!(f, "user {name:?}"),
             Self::Anonymous => f.write_str("anonymous caller"),
         }
     }
@@ -98,16 +109,28 @@ impl Directory {
         let nodes = nodes_from_config(cfg)?;
 
         for (role, config) in &cfg.roles {
+            if role == ADMIN_ROLE {
+                bail!("the role {ADMIN_ROLE:?} is built in and cannot be configured");
+            }
             for grant in &config.grants {
                 for node in &grant.nodes {
                     if node != "*" && !nodes.contains_key(node) {
                         bail!("role {role:?} grants on unknown node {node:?}");
                     }
                 }
+                if let Some(p) = grant.permissions.iter().find(|p| p.is_admin())
+                    && grant.nodes != ["*"]
+                {
+                    bail!(
+                        "role {role:?} grants {} on single nodes; admin permissions are granted \
+                         on all nodes (`nodes = [\"*\"]`)",
+                        p.as_str()
+                    );
+                }
             }
         }
         let known_role = |role: &String, whose: &str| -> anyhow::Result<()> {
-            if cfg.roles.contains_key(role) {
+            if role == ADMIN_ROLE || cfg.roles.contains_key(role) {
                 Ok(())
             } else {
                 bail!("{whose} has unknown role {role:?}")
@@ -201,26 +224,75 @@ impl Directory {
         }
     }
 
-    /// What `caller` may do on `node`.
-    pub(crate) fn permissions(&self, caller: &Caller<'_>, node: &str) -> BTreeSet<Permission> {
-        if self.open || *caller == Caller::System {
-            return Permission::ALL.into_iter().collect();
-        }
+    /// The grants of `caller`'s roles.
+    fn grants<'s>(
+        &'s self,
+        caller: &'s Caller<'_>,
+    ) -> Box<dyn Iterator<Item = &'s GrantConfig> + 's> {
         let roles: &[String] = match caller {
             Caller::Principal(name) => self
                 .principals
                 .iter()
                 .find(|p| p.name == *name)
                 .map_or(&[], |p| p.roles.as_slice()),
+            Caller::User { roles, .. } => roles,
             Caller::Anonymous | Caller::System => &self.anonymous_roles,
         };
-        roles
-            .iter()
-            .filter_map(|role| self.roles.get(role))
-            .flatten()
+        Box::new(
+            roles
+                .iter()
+                .filter_map(|role| self.roles.get(role))
+                .flatten(),
+        )
+    }
+
+    fn is_admin(caller: &Caller<'_>, directory: &Self) -> bool {
+        match caller {
+            Caller::System => true,
+            Caller::User { roles, .. } => roles.iter().any(|r| r == ADMIN_ROLE),
+            Caller::Principal(name) => directory
+                .principals
+                .iter()
+                .any(|p| p.name == *name && p.roles.iter().any(|r| r == ADMIN_ROLE)),
+            Caller::Anonymous => directory.anonymous_roles.iter().any(|r| r == ADMIN_ROLE),
+        }
+    }
+
+    /// What `caller` may do with the data of `node`. Without any access control configured
+    /// (`open`), everyone may do everything with the data.
+    pub(crate) fn permissions(&self, caller: &Caller<'_>, node: &str) -> BTreeSet<Permission> {
+        if self.open || Self::is_admin(caller, self) {
+            return Permission::DATA.into_iter().collect();
+        }
+        self.grants(caller)
             .filter(|grant| grant.nodes.iter().any(|n| n == "*" || n == node))
             .flat_map(|grant| grant.permissions.iter().copied())
+            .filter(|p| !p.is_admin())
             .collect()
+    }
+
+    /// The admin permissions of `caller`. Unlike data access, administration is never open:
+    /// it takes the `admin` role or a role granting `admin.*` permissions.
+    pub(crate) fn admin_permissions(&self, caller: &Caller<'_>) -> BTreeSet<Permission> {
+        if Self::is_admin(caller, self) {
+            return Permission::ADMIN.into_iter().collect();
+        }
+        self.grants(caller)
+            .flat_map(|grant| grant.permissions.iter().copied())
+            .filter(|p| p.is_admin())
+            .collect()
+    }
+
+    /// `PermissionDenied` unless `caller` has the admin `permission`.
+    pub(crate) fn require_admin(&self, caller: &Caller<'_>, permission: Permission) -> Result<()> {
+        if self.admin_permissions(caller).contains(&permission) {
+            Ok(())
+        } else {
+            Err(Error::new(
+                ErrorKind::PermissionDenied,
+                format!("{caller} lacks the permission {}", permission.as_str()),
+            ))
+        }
     }
 
     /// The context's node, if its caller has `permission` on it; `PermissionDenied` otherwise.
@@ -323,6 +395,7 @@ fn permission_verb(permission: Permission) -> &'static str {
         Permission::Retrieve => "retrieve",
         Permission::Store => "store",
         Permission::Send => "send",
+        admin => admin.as_str(),
     }
 }
 
@@ -419,6 +492,41 @@ mod tests {
         assert_eq!(node.backend, Backend::Local(Partition::default_partition()));
         assert_eq!(node.ae_title.as_ref().unwrap().as_str(), "MEDICUS");
         assert_eq!(dir.permissions(&Caller::Anonymous, DEFAULT_NODE).len(), 4);
+        // Open data access does not open the administration.
+        assert!(dir.admin_permissions(&Caller::Anonymous).is_empty());
+    }
+
+    #[test]
+    fn users_and_admin_permissions() {
+        let toml = format!(
+            "{CONFIG}\n[roles.ops]\ngrants = [{{ nodes = [\"*\"], permissions = [\"admin.jobs\", \"query\"] }}]"
+        );
+        let dir = Directory::from_config(&config(&toml)).unwrap();
+        let user = |roles: &[&str]| Caller::User {
+            name: "u".into(),
+            roles: roles.iter().map(|r| (*r).to_owned()).collect(),
+        };
+        let admin = user(&[ADMIN_ROLE]);
+        assert_eq!(dir.permissions(&admin, "RAD").len(), 4);
+        assert_eq!(
+            dir.admin_permissions(&admin),
+            Permission::ADMIN.into_iter().collect()
+        );
+        let ops = user(&["ops"]);
+        assert_eq!(dir.admin_permissions(&ops), [Permission::AdminJobs].into());
+        assert_eq!(dir.permissions(&ops, "VIEW"), [Permission::Query].into());
+        assert!(dir.require_admin(&ops, Permission::AdminJobs).is_ok());
+        let err = dir
+            .require_admin(&ops, Permission::AdminSystem)
+            .unwrap_err();
+        assert_eq!(err.kind, ErrorKind::PermissionDenied);
+        assert!(err.message.contains("admin.system"), "{}", err.message);
+        assert_eq!(dir.permissions(&user(&["viewer"]), "VIEW").len(), 2);
+        assert!(dir.admin_permissions(&user(&["viewer"])).is_empty());
+        assert_eq!(
+            dir.admin_permissions(&Caller::System).len(),
+            Permission::ADMIN.len()
+        );
     }
 
     #[test]
@@ -430,6 +538,9 @@ mod tests {
             "[nodes.A]\npartition = \"default\"\ndimse = { ae_title = \"SAME\" }\n[nodes.B]\npartition = \"default\"\ndimse = { ae_title = \"SAME\" }",
             "[roles.r]\ngrants = [{ nodes = [\"NOPE\"], permissions = [\"query\"] }]",
             "[principals.p]\nroles = [\"missing\"]",
+            // Admin permissions only on all nodes; the admin role is built in.
+            "[nodes.A]\npartition = \"default\"\n[roles.r]\ngrants = [{ nodes = [\"A\"], permissions = [\"admin.jobs\"] }]",
+            "[roles.admin]\ngrants = []",
         ] {
             assert!(Directory::from_config(&config(bad)).is_err(), "{bad}");
         }

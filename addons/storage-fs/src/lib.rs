@@ -14,7 +14,7 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 
 use futures::{StreamExt as _, TryStreamExt as _};
-use medicus_addon_sdk::{Registrar, async_trait, static_addon};
+use medicus_addon_sdk::{AddonManifest, Capability, Registrar, async_trait, static_addon};
 use medicus_core::capability::{BlobMeta, BlobStore, ByteStream, StorageUsage};
 use medicus_core::{BlobKey, Error, ErrorKind, Result};
 use serde::Deserialize;
@@ -24,7 +24,7 @@ use tokio::io::{AsyncReadExt as _, AsyncSeekExt as _, AsyncWriteExt as _};
 const READ_CHUNK: usize = 256 * 1024;
 const TMP_DIR: &str = ".tmp";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Directory holding the blobs.
@@ -195,12 +195,16 @@ pub fn init(reg: &mut Registrar) -> Result<()> {
     reg.register_blob_store(&cfg.name, store)
 }
 
+/// What this addon provides and needs (ADR-0004 §2).
+pub fn manifest() -> AddonManifest {
+    AddonManifest::new("storage-fs", env!("CARGO_PKG_VERSION"))
+        .provides([Capability::BlobStore])
+        .config_schema(medicus_addon_sdk::config_schema::<Config>())
+}
+
 /// Entry points for linking this addon into the server binary.
-pub static ADDON: medicus_addon_sdk::abi::StaticAddon = static_addon!(
-    name = "storage-fs",
-    version = env!("CARGO_PKG_VERSION"),
-    init = init
-);
+pub static ADDON: medicus_addon_sdk::abi::StaticAddon =
+    static_addon!(manifest = manifest(), init = init);
 
 #[cfg(test)]
 mod tests {

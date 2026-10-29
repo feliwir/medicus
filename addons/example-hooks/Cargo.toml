@@ -10,6 +10,7 @@ license.workspace = true
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
+schemars.workspace = true
 medicus-addon-sdk.workspace = true
 medicus-core.workspace = true
 

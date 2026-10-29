@@ -12,7 +12,7 @@ mod adapters;
 mod host_api;
 mod loader;
 
-pub use loader::{AddonInfo, AddonLoader, LoadError, LoadedAddon, Named};
+pub use loader::{AddonLoader, LoadError, LoadedAddon, Named, PreparedAddon, capability_kind};
 pub use medicus_abi::StaticAddon;
 
 /// The addon ABI version this host implements, `(major << 16) | minor`.

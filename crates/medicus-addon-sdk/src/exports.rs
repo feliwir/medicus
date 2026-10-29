@@ -13,13 +13,13 @@ use futures::FutureExt as _;
 use medicus_abi::bridge::{CompletionGuard, StreamCompletionGuard, export_stream, import_stream};
 use medicus_abi::ffi::{
     MD_PANICKED, MdBlobStoreVtable, MdBuffer, MdCancel, MdCompletion, MdEventHookVtable,
-    MdIndexStoreVtable, MdRange, MdReadStream, MdRemoteNodeVtable, MdServiceVtable, MdStr,
-    MdStreamCompletion,
+    MdHttpRoutesVtable, MdIndexStoreVtable, MdRange, MdReadStream, MdRemoteNodeVtable,
+    MdServiceVtable, MdStr, MdStreamCompletion,
 };
 use medicus_core::BlobKey;
 use medicus_core::capability::index::IndexRequest;
 use medicus_core::capability::{
-    BlobStore, EventHook, IndexStore, RemoteNode, RemoteRequest, Service,
+    BlobStore, EventHook, HttpRequest, HttpRoutes, IndexStore, RemoteNode, RemoteRequest, Service,
 };
 use medicus_core::event::Event;
 use medicus_core::{Error, Result};
@@ -341,6 +341,28 @@ async fn dispatch_index(
             offset,
         } => json(&index.list_jobs(state, limit, offset).await?),
         IndexRequest::ClaimJob { now } => json(&index.claim_job(now).await?),
+        IndexRequest::SettingsCurrent => json(&index.settings_current().await?),
+        IndexRequest::SettingsRevision { revision } => {
+            json(&index.settings_revision(revision).await?)
+        }
+        IndexRequest::SettingsHistory { limit, offset } => {
+            json(&index.settings_history(limit, offset).await?)
+        }
+        IndexRequest::PutSettings { revision } => json(&index.put_settings(&revision).await?),
+        IndexRequest::CreateUser { user } => json(&index.create_user(&user).await?),
+        IndexRequest::UpdateUser { user } => json(&index.update_user(&user).await?),
+        IndexRequest::GetUser { name } => json(&index.get_user(&name).await?),
+        IndexRequest::ListUsers => json(&index.list_users().await?),
+        IndexRequest::DeleteUser { name } => json(&index.delete_user(&name).await?),
+        IndexRequest::PutCredential { credential } => {
+            json(&index.put_credential(&credential).await?)
+        }
+        IndexRequest::FindCredential { secret_hash } => {
+            json(&index.find_credential(&secret_hash).await?)
+        }
+        IndexRequest::ListCredentials { user } => json(&index.list_credentials(&user).await?),
+        IndexRequest::DeleteCredential { id } => json(&index.delete_credential(id).await?),
+        IndexRequest::PruneCredentials { now } => json(&index.prune_credentials(now).await?),
     }
 }
 
@@ -433,6 +455,74 @@ pub(crate) unsafe extern "C" fn destroy_remote_node(instance: *mut c_void) {
     guarded(|| {
         // SAFETY: called exactly once per instance created by `remote_node`.
         drop(unsafe { Box::from_raw(instance.cast::<DynRemoteNode>()) });
+    });
+}
+
+// ------------------------------------------------------------------------------------------------
+// HttpRoutes
+
+type DynHttpRoutes = Arc<dyn HttpRoutes>;
+
+static HTTP_ROUTES_VTABLE: MdHttpRoutesVtable = MdHttpRoutesVtable {
+    size: size_of::<MdHttpRoutesVtable>(),
+    handle: http_handle,
+    destroy: destroy_http_routes,
+};
+
+pub(crate) fn http_routes(routes: DynHttpRoutes) -> (*const MdHttpRoutesVtable, *mut c_void) {
+    (
+        &raw const HTTP_ROUTES_VTABLE,
+        Box::into_raw(Box::new(routes)).cast(),
+    )
+}
+
+unsafe extern "C" fn http_handle(
+    instance: *mut c_void,
+    request: MdStr,
+    body: MdStr,
+    _cancel: MdCancel,
+    done: MdStreamCompletion,
+) {
+    let guard = StreamCompletionGuard::new(done);
+    guarded(move || {
+        // SAFETY: live instance; `request` and `body` are valid during this call, so both are
+        // copied before it returns.
+        let (routes, request, body) = unsafe {
+            (
+                (*instance.cast::<DynHttpRoutes>()).clone(),
+                request.as_bytes(),
+                bytes::Bytes::copy_from_slice(body.as_bytes()),
+            )
+        };
+        let request: HttpRequest = match serde_json::from_slice(request) {
+            Ok(r) => r,
+            Err(e) => {
+                return guard.err(&Error::invalid_argument(format!("invalid request: {e}")));
+            }
+        };
+        runtime().spawn(async move {
+            match AssertUnwindSafe(routes.handle(request, body))
+                .catch_unwind()
+                .await
+            {
+                Ok(Ok(response)) => match to_json(&response.head) {
+                    Ok(head) => guard.ok_with(export_stream(response.body, runtime()), head),
+                    Err(e) => guard.err(&e),
+                },
+                Ok(Err(e)) => guard.err(&e),
+                Err(_) => guard.err(&Error::new(
+                    medicus_core::ErrorKind::Panicked,
+                    "addon panicked",
+                )),
+            }
+        });
+    });
+}
+
+pub(crate) unsafe extern "C" fn destroy_http_routes(instance: *mut c_void) {
+    guarded(|| {
+        // SAFETY: called exactly once per instance created by `http_routes`.
+        drop(unsafe { Box::from_raw(instance.cast::<DynHttpRoutes>()) });
     });
 }
 

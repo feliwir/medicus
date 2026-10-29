@@ -41,6 +41,24 @@ jobs:
       - run: cargo nextest run --workspace --all-features
       - run: cargo test --workspace --doc
 
+  # The admin UI (addons/admin-ui/ui): types, unit tests and the production build the admin-ui addon embeds.
+  ui:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: addons/admin-ui/ui
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: addons/admin-ui/ui/package-lock.json
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+
   # The C example addon under AddressSanitizer: memory errors in the C ABI path fail CI.
   c-addon-asan:
     runs-on: ubuntu-latest

@@ -421,13 +421,22 @@ static const MdEventHookVtable EVENT_HOOK_VTABLE = {
 
 /* ---- entry points --------------------------------------------------------------------------- */
 
-static MdAddonInfo g_info;
-
 MEDICUS_ADDON_EXPORT uint32_t medicus_addon_abi_version(void) { return MD_ABI_VERSION; }
 
-MEDICUS_ADDON_EXPORT const MdAddonInfo *medicus_addon_init(const MdHostApi *host) {
+/* The manifest: read by the host before init, so it is a constant. It declares the two capability
+ * kinds this addon registers; registering any other kind would be refused. */
+static const char MANIFEST[] =
+    "{\"name\":\"example-c\",\"version\":\"0.1.0\",\"target\":\"" MD_ARCH "-" MD_OS "\","
+    "\"provides\":[\"blob_store\",\"event_hook\"]}";
+
+MEDICUS_ADDON_EXPORT MdStr medicus_addon_manifest(void) {
+    MdStr m = {(const uint8_t *)MANIFEST, sizeof MANIFEST - 1};
+    return m;
+}
+
+MEDICUS_ADDON_EXPORT MdStatus medicus_addon_init(const MdHostApi *host) {
     if (!host || host->size < sizeof(MdHostApi) || host->abi_version != MD_ABI_VERSION) {
-        return NULL;
+        return MD_UNSUPPORTED;
     }
     g_host = host;
 
@@ -436,28 +445,26 @@ MEDICUS_ADDON_EXPORT const MdAddonInfo *medicus_addon_init(const MdHostApi *host
     if (!store || !hook) {
         free(store);
         free(hook);
-        return NULL;
+        return MD_RESOURCE_EXHAUSTED;
     }
     lock_init(&store->lock);
     lock_init(&hook->lock);
 
     /* On refusal the host has not taken ownership, so we free the instance ourselves. */
-    if (host->register_capability(host->ctx, MD_CAP_BLOB_STORE, str("memory"),
-                                  &BLOB_STORE_VTABLE, store) != MD_OK) {
+    MdStatus status = host->register_capability(host->ctx, MD_CAP_BLOB_STORE, str("memory"),
+                                                &BLOB_STORE_VTABLE, store);
+    if (status != MD_OK) {
         blob_destroy(store);
         hook_destroy(hook);
-        return NULL;
+        return status;
     }
-    if (host->register_capability(host->ctx, MD_CAP_EVENT_HOOK, str("count-events"),
-                                  &EVENT_HOOK_VTABLE, hook) != MD_OK) {
+    status = host->register_capability(host->ctx, MD_CAP_EVENT_HOOK, str("count-events"),
+                                       &EVENT_HOOK_VTABLE, hook);
+    if (status != MD_OK) {
         hook_destroy(hook);
-        return NULL;
+        return status;
     }
 
-    g_info.size = sizeof(MdAddonInfo);
-    g_info.name = str("example-c");
-    g_info.version = str("0.1.0");
-    g_info.target = str(MD_ARCH "-" MD_OS);
     log_msg(MD_LOG_INFO, "example-c initialized");
-    return &g_info;
+    return MD_OK;
 }

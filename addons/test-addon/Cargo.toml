@@ -16,7 +16,9 @@ medicus-core.workspace = true
 
 bytes.workspace = true
 futures.workspace = true
+schemars.workspace = true
 serde.workspace = true
+serde_json.workspace = true
 tracing.workspace = true
 
 [lints]

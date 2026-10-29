@@ -11,9 +11,12 @@
 //! returned as stored: a request for another transfer syntax is answered with 406. Rendered
 //! resources and thumbnails are decoded with dicom-pixeldata and served as JPEG, PNG or GIF.
 //!
-//! The addon runs its own HTTP listener. Authentication is left to a reverse proxy for now:
-//! with `user_header` set, the header it names (e.g. `X-Forwarded-User`) is taken as the
-//! authenticated principal; without it, every caller is anonymous.
+//! The addon runs its own HTTP listener. Callers authenticate with the server's own credentials:
+//! an API token (`Authorization: Bearer`) or the session cookie of the admin UI, checked through
+//! the host. Requests that change data and are authenticated by the cookie alone need an
+//! `X-Requested-With` header. Alternatively a reverse proxy authenticates: with `user_header`
+//! set, the header it names (e.g. `X-Forwarded-User`) is taken as the authenticated principal —
+//! only safe when every request comes through that proxy. Otherwise callers are anonymous.
 
 mod error;
 mod multipart;
@@ -28,7 +31,9 @@ use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 use axum::http::HeaderName;
-use medicus_addon_sdk::{Host, Registrar, async_trait, runtime, static_addon};
+use medicus_addon_sdk::{
+    AddonManifest, Capability, Host, Registrar, async_trait, runtime, static_addon,
+};
 use medicus_core::capability::{HostServices as _, Service};
 use medicus_core::{Error, ErrorKind, Result};
 use serde::Deserialize;
@@ -36,7 +41,7 @@ use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Address and port to listen on.
@@ -75,6 +80,9 @@ struct Listener {
 #[async_trait]
 impl Service for Listener {
     async fn start(&self) -> Result<()> {
+        // Starting again (after the nodes changed) replaces the running listener: it has to
+        // release the port first.
+        self.stop().await?;
         let nodes: HashMap<String, String> = self
             .host
             .nodes()
@@ -136,14 +144,10 @@ impl Service for Listener {
                 tracing::error!(error = %e, "DICOMweb listener failed");
             }
         });
-        let previous = self
+        *self
             .running
             .lock()
-            .map_err(|_| Error::internal("listener state poisoned"))?
-            .replace((token, task));
-        if let Some((token, _)) = previous {
-            token.cancel();
-        }
+            .map_err(|_| Error::internal("listener state poisoned"))? = Some((token, task));
         tracing::info!(listen = %addr, nodes = ?paths, "DICOMweb listening");
         Ok(())
     }
@@ -174,9 +178,14 @@ pub fn init(reg: &mut Registrar) -> Result<()> {
     reg.register_service("http", listener)
 }
 
+/// What this addon provides and needs (ADR-0004 §2).
+pub fn manifest() -> AddonManifest {
+    AddonManifest::new("dicomweb", env!("CARGO_PKG_VERSION"))
+        .provides([Capability::Service])
+        .requires([Capability::IndexStore, Capability::BlobStore])
+        .config_schema(medicus_addon_sdk::config_schema::<Config>())
+}
+
 /// Entry points for linking this addon into the server binary.
-pub static ADDON: medicus_addon_sdk::abi::StaticAddon = static_addon!(
-    name = "dicomweb",
-    version = env!("CARGO_PKG_VERSION"),
-    init = init
-);
+pub static ADDON: medicus_addon_sdk::abi::StaticAddon =
+    static_addon!(manifest = manifest(), init = init);

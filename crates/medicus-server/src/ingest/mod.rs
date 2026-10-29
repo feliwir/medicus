@@ -96,7 +96,7 @@ impl Archive {
         };
 
         // Stream the complete file: the buffered prefix, then the rest as it arrives.
-        let store_name = self.store_for(partition).to_owned();
+        let store_name = self.store_for(partition);
         let store = self.store(&store_name)?;
         let key = BlobKey::generate(partition, BlobKind::Instance);
         let written = Arc::new(AtomicU64::new(0));

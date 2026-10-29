@@ -22,20 +22,20 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use hmac::{Hmac, KeyInit as _, Mac as _};
-use medicus_addon_sdk::{Registrar, async_trait, static_addon};
+use medicus_addon_sdk::{AddonManifest, Capability, Registrar, async_trait, static_addon};
 use medicus_core::capability::{EventFilter, EventHook};
 use medicus_core::event::{Event, EventKind};
 use medicus_core::{Error, ErrorKind, Partition, Result};
 use serde::Deserialize;
 use sha2::Sha256;
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub hooks: Vec<HookConfig>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct HookConfig {
     /// Subscriber name; delivery progress is kept per name.
@@ -43,9 +43,11 @@ pub struct HookConfig {
     pub url: String,
     /// Event kinds to deliver; empty: all.
     #[serde(default)]
+    #[schemars(with = "Vec<String>")]
     pub kinds: Vec<EventKind>,
     /// Partitions whose events to deliver; empty: all (including node-wide events).
     #[serde(default)]
+    #[schemars(with = "Vec<String>")]
     pub partitions: Vec<Partition>,
     /// Shared secret for the `X-Medicus-Signature` header.
     #[serde(default)]
@@ -140,12 +142,17 @@ pub fn init(reg: &mut Registrar) -> Result<()> {
     Ok(())
 }
 
+/// What this addon provides and needs (ADR-0004 §2).
+pub fn manifest() -> AddonManifest {
+    AddonManifest::new("events-webhook", env!("CARGO_PKG_VERSION"))
+        .provides([Capability::EventHook])
+        .requires([Capability::IndexStore])
+        .config_schema(medicus_addon_sdk::config_schema::<Config>())
+}
+
 /// Entry points for linking this addon into the server binary.
-pub static ADDON: medicus_addon_sdk::abi::StaticAddon = static_addon!(
-    name = "events-webhook",
-    version = env!("CARGO_PKG_VERSION"),
-    init = init
-);
+pub static ADDON: medicus_addon_sdk::abi::StaticAddon =
+    static_addon!(manifest = manifest(), init = init);
 
 #[cfg(test)]
 mod tests {

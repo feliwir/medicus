@@ -22,7 +22,8 @@ pub struct Archive {
     stores: BTreeMap<String, Arc<dyn BlobStore>>,
     pub(crate) default_store: String,
     /// Partitions writing to their own store instead of the default one.
-    partition_stores: BTreeMap<Partition, String>,
+    /// Changes with the settings, while ingests run.
+    partition_stores: arc_swap::ArcSwap<BTreeMap<Partition, String>>,
     pub(crate) policy: DuplicatePolicy,
     pub(crate) max_header_bytes: usize,
     pub(crate) extra_tags: Arc<[ExtraTag]>,
@@ -86,7 +87,7 @@ impl Archive {
             index: index.clone(),
             stores: caps.blob_stores.clone(),
             default_store: cfg.storage.clone(),
-            partition_stores: BTreeMap::new(),
+            partition_stores: arc_swap::ArcSwap::default(),
             policy: cfg.duplicate_policy,
             max_header_bytes: cfg.max_header_bytes,
             extra_tags: extra_tags.into(),
@@ -96,25 +97,36 @@ impl Archive {
         })
     }
 
-    /// Routes the partitions' new instances to their own blob stores.
-    pub(crate) fn with_partition_stores(
-        mut self,
-        stores: BTreeMap<Partition, String>,
-    ) -> anyhow::Result<Self> {
-        for (partition, store) in &stores {
+    /// Checks that the blob stores the partitions name exist.
+    pub(crate) fn check_partition_stores(
+        &self,
+        stores: &BTreeMap<Partition, String>,
+    ) -> anyhow::Result<()> {
+        for (partition, store) in stores {
             if !self.stores.contains_key(store) {
                 anyhow::bail!("partition {partition}: blob store {store:?} is not configured");
             }
         }
-        self.partition_stores = stores;
-        Ok(self)
+        Ok(())
+    }
+
+    /// Routes the partitions' new instances to their own blob stores, from now on.
+    pub(crate) fn set_partition_stores(
+        &self,
+        stores: BTreeMap<Partition, String>,
+    ) -> anyhow::Result<()> {
+        self.check_partition_stores(&stores)?;
+        self.partition_stores.store(Arc::new(stores));
+        Ok(())
     }
 
     /// The blob store `partition` writes new instances to.
-    pub(crate) fn store_for(&self, partition: &Partition) -> &str {
+    pub(crate) fn store_for(&self, partition: &Partition) -> String {
         self.partition_stores
+            .load()
             .get(partition)
-            .map_or(&self.default_store, String::as_str)
+            .unwrap_or(&self.default_store)
+            .clone()
     }
 
     pub(crate) fn store(&self, name: &str) -> Result<&Arc<dyn BlobStore>> {

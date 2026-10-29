@@ -12,6 +12,7 @@ use axum::http::{HeaderName, HeaderValue, Method, header};
 use axum::routing::{get, post};
 use medicus_addon_sdk::Host;
 use medicus_core::CallContext;
+use medicus_core::capability::HostServices as _;
 use medicus_core::event::Origin;
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
@@ -85,13 +86,35 @@ impl FromRequestParts<State> for Request {
             .get::<ConnectInfo<SocketAddr>>()
             .map(|c| c.0.to_string())
             .unwrap_or_default();
-        let principal = state.user_header.as_ref().and_then(|name| {
-            parts
-                .headers
-                .get(name)
-                .and_then(|v| v.to_str().ok())
-                .map(str::to_owned)
-        });
+        let principal = match credential(parts) {
+            Some((secret, from_cookie)) => {
+                // A browser sends the cookie along with requests other sites make it send.
+                if from_cookie
+                    && !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS)
+                    && !parts.headers.contains_key("x-requested-with")
+                {
+                    return Err(WebError::new(
+                        axum::http::StatusCode::FORBIDDEN,
+                        "a request authenticated by the session cookie that changes data needs \
+                         an X-Requested-With header",
+                    ));
+                }
+                let user = state.host.authenticate(&secret).await?.ok_or_else(|| {
+                    WebError::new(
+                        axum::http::StatusCode::UNAUTHORIZED,
+                        "the session or API token is invalid or expired",
+                    )
+                })?;
+                Some(user)
+            }
+            None => state.user_header.as_ref().and_then(|name| {
+                parts
+                    .headers
+                    .get(name)
+                    .and_then(|v| v.to_str().ok())
+                    .map(str::to_owned)
+            }),
+        };
         let request_id = parts
             .headers
             .get("x-request-id")
@@ -123,6 +146,31 @@ impl FromRequestParts<State> for Request {
             params,
         })
     }
+}
+
+/// The server's own credential on a request: a bearer token, else the session cookie (then the
+/// flag is set).
+fn credential(parts: &Parts) -> Option<(String, bool)> {
+    let bearer = parts
+        .headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "));
+    if let Some(token) = bearer {
+        return Some((token.trim().to_owned(), false));
+    }
+    parts
+        .headers
+        .get_all(header::COOKIE)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|v| v.split(';'))
+        .find_map(|c| {
+            c.trim()
+                .strip_prefix(medicus_core::access::SESSION_COOKIE)?
+                .strip_prefix('=')
+                .map(|s| (s.to_owned(), true))
+        })
 }
 
 /// The routes of one service root.

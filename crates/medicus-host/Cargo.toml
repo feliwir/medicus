@@ -12,6 +12,7 @@ medicus-abi.workspace = true
 medicus-core.workspace = true
 
 async-trait.workspace = true
+bytes.workspace = true
 libloading.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
@@ -24,6 +25,7 @@ tracing.workspace = true
 [dev-dependencies]
 example-c = { path = "../../addons/example-c" }
 index-sqlite = { path = "../../addons/index-sqlite" }
+medicus-addon-sdk.workspace = true
 medicus-testkit.workspace = true
 storage-fs = { path = "../../addons/storage-fs" }
 tempfile.workspace = true

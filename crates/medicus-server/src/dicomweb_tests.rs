@@ -502,3 +502,292 @@ async fn stow_and_c_store_produce_equivalent_events() {
     while delivery.join_next().await.is_some() {}
     node.stop_services().await;
 }
+
+/// Settings changes take effect without a restart where they can (ADR-0004 §4): a node added in
+/// the settings is served at once, while other sections wait for a restart.
+#[tokio::test(flavor = "multi_thread")]
+async fn settings_apply_without_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let toml = format!(
+        r#"
+        [http]
+        listen = "127.0.0.1:{}"
+        [nodes.A]
+        partition = "default"
+        dicomweb = {{ path = "a" }}
+        "#,
+        free_port()
+    );
+    let node = node(dir.path(), port, &toml, json!({})).await;
+    let client = reqwest::Client::new();
+    let studies = |path: &str| format!("http://127.0.0.1:{port}/nodes/{path}/rs/studies");
+    assert_eq!(client.get(studies("b")).send().await.unwrap().status(), 404);
+
+    let (revision, mut settings) = node.settings().await;
+    assert_eq!(revision, 1);
+    settings.partitions.insert(
+        "tenant-b".parse().unwrap(),
+        crate::config::PartitionConfig::default(),
+    );
+    settings.nodes.insert(
+        "B".into(),
+        crate::config::NodeConfig {
+            partition: Some("tenant-b".parse().unwrap()),
+            peer: None,
+            dimse: None,
+            dicomweb: Some(crate::config::NodeDicomwebConfig { path: "b".into() }),
+        },
+    );
+    settings.jobs.concurrency += 1;
+
+    // Invalid settings and stale revisions are refused, and nothing is stored.
+    let mut invalid = settings.clone();
+    invalid.nodes.get_mut("B").unwrap().partition = Some("nowhere".parse().unwrap());
+    let err = node
+        .apply_settings(1, invalid, None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, medicus_core::ErrorKind::InvalidArgument, "{err}");
+    let err = node
+        .apply_settings(0, settings.clone(), None, None)
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, medicus_core::ErrorKind::Conflict, "{err}");
+
+    let applied = node
+        .apply_settings(
+            1,
+            settings.clone(),
+            Some("admin".into()),
+            Some("add B".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied.revision, 2);
+    assert_eq!(applied.restart_required, ["jobs"]);
+    assert_eq!(node.settings().await, (2, settings));
+
+    // B is served at once, and stores into its partition.
+    let stored = client
+        .post(studies("b"))
+        .header("content-type", stow_body(&[]).0)
+        .body({
+            let file = InstanceBuilder::new("3.1", "3.1.1", "3.1.1.1").build();
+            stow_body(&[file]).1
+        })
+        .send()
+        .await
+        .unwrap();
+    assert!(stored.status().is_success(), "{}", stored.status());
+    let b = medicus_core::Partition::parse("tenant-b").unwrap();
+    let study = medicus_core::capability::index::ResourceUid::Study("3.1".parse().unwrap());
+    assert_eq!(
+        node.archive.index.locate(&b, &study).await.unwrap().len(),
+        1
+    );
+    assert!(
+        client
+            .get(studies("a"))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+
+    let events = node.archive.index.events_after(0, 100).await.unwrap();
+    let changed = events
+        .iter()
+        .find(|e| e.kind == EventKind::ConfigChanged)
+        .unwrap();
+    assert_eq!(changed.detail["revision"], 2);
+    assert_eq!(changed.detail["restart_required"], json!(["jobs"]));
+
+    // A restart request ends serving with `Exit::Restart`.
+    node.stop_services().await;
+    let node = std::sync::Arc::new(node);
+    let serving = tokio::spawn(node.clone().serve(std::future::pending()));
+    node.request_restart();
+    assert_eq!(serving.await.unwrap().unwrap(), crate::Exit::Restart);
+}
+
+/// The server's own credentials work for `DICOMweb`: API tokens and the admin UI's session cookie
+/// (ADR-0004 §5). The core resolves the user and checks their roles.
+#[tokio::test(flavor = "multi_thread")]
+async fn sessions_and_tokens_authenticate() {
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let toml = r#"
+        [nodes.A]
+        partition = "default"
+        dicomweb = { path = "a" }
+        [roles.viewer]
+        grants = [{ nodes = ["A"], permissions = ["query", "store"] }]
+    "#;
+    let node = node(dir.path(), port, toml, json!({})).await;
+    node.accounts
+        .create_user(
+            "alice",
+            Some("alice's password"),
+            vec!["viewer".into()],
+            None,
+        )
+        .await
+        .unwrap();
+    let token = node
+        .accounts
+        .create_token("alice", None, None)
+        .await
+        .unwrap()
+        .secret;
+    let session = node
+        .accounts
+        .login("alice", "alice's password")
+        .await
+        .unwrap()
+        .unwrap()
+        .secret;
+    let client = reqwest::Client::new();
+    let studies = format!("http://127.0.0.1:{port}/nodes/a/rs/studies");
+
+    assert_eq!(client.get(&studies).send().await.unwrap().status(), 403);
+    let bearer = client
+        .get(&studies)
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap();
+    assert!(bearer.status().is_success(), "{}", bearer.status());
+    let forged = client
+        .get(&studies)
+        .bearer_auth("mdt_00")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forged.status(), 401);
+
+    let cookie = format!("{}={session}", medicus_core::access::SESSION_COOKIE);
+    let get = client
+        .get(&studies)
+        .header("cookie", &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert!(get.status().is_success(), "{}", get.status());
+    // Storing with the cookie alone needs X-Requested-With.
+    let file = InstanceBuilder::new("4.1", "4.1.1", "4.1.1.1").build();
+    let (content_type, body) = stow_body(&[file]);
+    let stow = || {
+        client
+            .post(&studies)
+            .header("cookie", &cookie)
+            .header("content-type", &content_type)
+            .body(body.clone())
+    };
+    assert_eq!(stow().send().await.unwrap().status(), 403);
+    let stored = stow()
+        .header("x-requested-with", "fetch")
+        .send()
+        .await
+        .unwrap();
+    assert!(stored.status().is_success(), "{}", stored.status());
+    let events = node.archive.index.events_after(0, 100).await.unwrap();
+    assert!(events.iter().any(|e| e.kind == EventKind::InstanceStored
+        && matches!(&e.origin, Origin::Dicomweb { principal: Some(p), .. } if p == "alice")));
+    node.stop_services().await;
+}
+
+/// The core's `DICOMweb` proxy: the same services through the core's port, with the caller's
+/// credentials and the core's host in the URLs; a trusted-proxy header cannot be smuggled in.
+#[tokio::test(flavor = "multi_thread")]
+async fn the_core_proxies_dicomweb() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, core) = (free_port(), free_port());
+    let toml = format!(
+        r#"
+        [http]
+        listen = "127.0.0.1:{core}"
+        [nodes.A]
+        partition = "default"
+        dicomweb = {{ path = "a" }}
+        [roles.reader]
+        grants = [{{ nodes = ["A"], permissions = ["query", "retrieve", "store"] }}]
+        [principals.proxied]
+        roles = ["reader"]
+        "#
+    );
+    let node = node(dir.path(), port, &toml, json!({ "user_header": "x-user" })).await;
+    node.accounts
+        .create_user("alice", None, vec!["reader".into()], None)
+        .await
+        .unwrap();
+    let token = node
+        .accounts
+        .create_token("alice", None, None)
+        .await
+        .unwrap()
+        .secret;
+    node.stop_services().await;
+    let node = std::sync::Arc::new(node);
+    let serving = tokio::spawn(node.clone().serve(std::future::pending()));
+    // `serve` starts the services again; wait until the core answers.
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{core}");
+    for _ in 0..50 {
+        if client
+            .get(format!("{base}/health/live"))
+            .send()
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+
+    // The header a trusted proxy sets works directly, but not through the core.
+    let direct = client
+        .get(format!("http://127.0.0.1:{port}/nodes/a/rs/studies"))
+        .header("x-user", "proxied")
+        .send()
+        .await
+        .unwrap();
+    assert!(direct.status().is_success(), "{}", direct.status());
+    let smuggled = client
+        .get(format!("{base}/nodes/a/rs/studies"))
+        .header("x-user", "proxied")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(smuggled.status(), 403);
+
+    // A token passes through; requests and responses stream both ways.
+    let file = InstanceBuilder::new("5.1", "5.1.1", "5.1.1.1").build();
+    let (content_type, body) = stow_body(&[file]);
+    let stored = client
+        .post(format!("{base}/nodes/a/rs/studies"))
+        .bearer_auth(&token)
+        .header("content-type", content_type)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(stored.status().is_success(), "{}", stored.status());
+    let found: Value = client
+        .get(format!("{base}/rs/studies"))
+        .bearer_auth(&token)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let url = found[0][tags::RETRIEVE_URL.json_key()]["Value"][0]
+        .as_str()
+        .unwrap();
+    assert!(url.starts_with(&format!("{base}/rs/studies/5.1")), "{url}");
+
+    node.request_restart();
+    serving.await.unwrap().unwrap();
+}

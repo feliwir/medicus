@@ -14,7 +14,7 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use index_sql_common::{Backend, Cell, CellKind, Dialect, SqlIndex, Stmt, Tx};
-use medicus_addon_sdk::{Registrar, block_on, static_addon};
+use medicus_addon_sdk::{AddonManifest, Capability, Registrar, block_on, static_addon};
 use medicus_core::{Error, ErrorKind, Result};
 use serde::Deserialize;
 use sqlx::sqlite::{
@@ -24,7 +24,7 @@ use sqlx::{AssertSqlSafe, Row as _, Sqlite};
 
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
     /// Database file; created if missing.
@@ -185,12 +185,16 @@ pub fn init(reg: &mut Registrar) -> Result<()> {
     reg.register_index_store(&cfg.name, SqlIndex::new(backend))
 }
 
+/// What this addon provides and needs (ADR-0004 §2).
+pub fn manifest() -> AddonManifest {
+    AddonManifest::new("index-sqlite", env!("CARGO_PKG_VERSION"))
+        .provides([Capability::IndexStore])
+        .config_schema(medicus_addon_sdk::config_schema::<Config>())
+}
+
 /// Entry points for linking this addon into the server binary.
-pub static ADDON: medicus_addon_sdk::abi::StaticAddon = static_addon!(
-    name = "index-sqlite",
-    version = env!("CARGO_PKG_VERSION"),
-    init = init
-);
+pub static ADDON: medicus_addon_sdk::abi::StaticAddon =
+    static_addon!(manifest = manifest(), init = init);
 
 #[cfg(test)]
 mod tests {

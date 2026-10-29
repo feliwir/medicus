@@ -19,7 +19,7 @@
 /**
  * Minor ABI version.
  */
-#define MD_ABI_MINOR 6
+#define MD_ABI_MINOR 7
 
 /**
  * `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
@@ -38,6 +38,11 @@
 #define MD_CAP_SERVICE 4
 
 #define MD_CAP_REMOTE_NODE 5
+
+/**
+ * HTTP routes under a path prefix, mounted into the core's HTTP server (ABI 0.7).
+ */
+#define MD_CAP_HTTP_ROUTES 6
 
 /**
  * Log levels for `MdHostApi::log`.
@@ -118,11 +123,13 @@ typedef struct MdReadStream {
 } MdReadStream;
 
 /**
- * One-shot callback delivering a stream (on `MD_OK`) or an error message.
+ * One-shot callback delivering a stream (on `MD_OK`) or an error message. With `MD_OK`, `data`
+ * may carry call-specific data besides the stream (ABI 0.7: the head of an HTTP response);
+ * otherwise it is the error message.
  */
 typedef struct MdStreamCompletion {
   void *ctx;
-  void (*complete)(void *ctx, MdStatus status, struct MdReadStream stream, struct MdBuffer error);
+  void (*complete)(void *ctx, MdStatus status, struct MdReadStream stream, struct MdBuffer data);
 } MdStreamCompletion;
 
 /**
@@ -170,7 +177,8 @@ typedef struct MdHostApi {
    * `destination` node → ingest outcome), `authorize` (`permission`), `permissions` (→ the
    * caller's permissions on the node), `submit_job` (`kind` → the queued job). Others:
    * `nodes` and `peers` (`null` → the configured nodes / peers), `job_progress` (`{"job",
-   * "progress"}` → `true`, or `false` once the job was cancelled). Unknown
+   * "progress"}` → `true`, or `false` once the job was cancelled), `authenticate` (`{"secret"}`
+   * → the user name of a session or API token, or `null`; ABI 0.7). Unknown
    * methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
    * ready.
    */
@@ -188,19 +196,6 @@ typedef struct MdHostApi {
                         struct MdCancel cancel,
                         struct MdStreamCompletion done);
 } MdHostApi;
-
-/**
- * Information returned by `medicus_addon_init`. Must stay valid for the lifetime of the process.
- */
-typedef struct MdAddonInfo {
-  size_t size;
-  struct MdStr name;
-  struct MdStr version;
-  /**
-   * `<arch>-<os>`, compared against the host's.
-   */
-  struct MdStr target;
-} MdAddonInfo;
 
 /**
  * Optional byte range `[start, end)`.
@@ -310,14 +305,50 @@ typedef struct MdRemoteNodeVtable {
 } MdRemoteNodeVtable;
 
 /**
+ * `MD_CAP_HTTP_ROUTES` (ABI 0.7): HTTP routes, registered under their path prefix (e.g. `/`),
+ * which the core mounts into its HTTP server. The core buffers the request body; the response
+ * body is streamed.
+ */
+typedef struct MdHttpRoutesVtable {
+  size_t size;
+  /**
+   * Handles a request. `request` is JSON `{"method", "path", "query"?, "headers": [[name,
+   * value], ...], "remote_addr", "principal"?}` (see `medicus_core::capability::HttpRequest`),
+   * `body` the whole request body; both are valid during this call only. Completes with the
+   * response body as the stream and its head as `data`: JSON `{"status", "headers": [[name,
+   * value], ...]}`.
+   */
+  void (*handle)(void *instance,
+                 struct MdStr request,
+                 struct MdStr body,
+                 struct MdCancel cancel,
+                 struct MdStreamCompletion done);
+  void (*destroy)(void *instance);
+} MdHttpRoutesVtable;
+
+/**
  * Signature of the exported `medicus_addon_abi_version` symbol.
  */
 typedef uint32_t (*MdAbiVersionFn)(void);
 
 /**
- * Signature of the exported `medicus_addon_init` symbol. Returns NULL on failure.
+ * Signature of the exported `medicus_addon_manifest` symbol (ABI 0.7): the addon's manifest as
+ * UTF-8 JSON, valid for the lifetime of the process. The host reads it before `medicus_addon_init`
+ * and without a host API, so it must not depend on initialization:
+ * `{"name", "version", "target": "<arch>-<os>", "provides": ["blob_store" | "event_hook" |
+ * "index_store" | "service" | "remote_node" | "http_routes", ...], "requires": [{"capability",
+ * "addon"?}, ...], "required": bool, "config_schema"?: <JSON Schema of the configuration>}` (see
+ * `medicus_core::addon::AddonManifest`). Registering a capability kind
+ * not listed in `provides` is refused.
  */
-typedef const struct MdAddonInfo *(*MdInitFn)(const struct MdHostApi *host);
+typedef struct MdStr (*MdManifestFn)(void);
+
+/**
+ * Signature of the exported `medicus_addon_init` symbol: registers the addon's capabilities.
+ * Returns `MD_OK`, or another status after logging why initialization failed (ABI 0.7; before,
+ * it returned the addon's information).
+ */
+typedef MdStatus (*MdInitFn)(const struct MdHostApi *host);
 
 #define MD_OK 0
 
@@ -343,7 +374,12 @@ typedef const struct MdAddonInfo *(*MdInitFn)(const struct MdHostApi *host);
 
 #define MD_PERMISSION_DENIED 11
 
-/* Marks the two entry points as exported from the shared library. */
+/**
+ * The state changed since the caller read it, e.g. a stale settings revision (ABI 0.7).
+ */
+#define MD_CONFLICT 12
+
+/* Marks the entry points as exported from the shared library. */
 #if defined(_WIN32)
 #define MEDICUS_ADDON_EXPORT __declspec(dllexport)
 #else
@@ -356,7 +392,8 @@ extern "C" {
 
 /* Entry points every addon exports. */
 MEDICUS_ADDON_EXPORT uint32_t medicus_addon_abi_version(void);
-MEDICUS_ADDON_EXPORT const MdAddonInfo *medicus_addon_init(const MdHostApi *host);
+MEDICUS_ADDON_EXPORT MdStr medicus_addon_manifest(void);
+MEDICUS_ADDON_EXPORT MdStatus medicus_addon_init(const MdHostApi *host);
 
 #ifdef __cplusplus
 }  /* extern "C" */

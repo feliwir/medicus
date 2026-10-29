@@ -20,7 +20,7 @@ use core::ffi::c_void;
 /// Major ABI version. While it is 0, every minor change is breaking.
 pub const MD_ABI_MAJOR: u32 = 0;
 /// Minor ABI version.
-pub const MD_ABI_MINOR: u32 = 6;
+pub const MD_ABI_MINOR: u32 = 7;
 /// `(major << 16) | minor`, as returned by `medicus_addon_abi_version`.
 pub const MD_ABI_VERSION: u32 = (MD_ABI_MAJOR << 16) | MD_ABI_MINOR;
 
@@ -39,6 +39,8 @@ pub const MD_UNSUPPORTED: MdStatus = 8;
 pub const MD_INTERNAL: MdStatus = 9;
 pub const MD_PANICKED: MdStatus = 10;
 pub const MD_PERMISSION_DENIED: MdStatus = 11;
+/// The state changed since the caller read it, e.g. a stale settings revision (ABI 0.7).
+pub const MD_CONFLICT: MdStatus = 12;
 
 /// Capability kinds for `MdHostApi::register_capability`.
 pub const MD_CAP_BLOB_STORE: u32 = 1;
@@ -46,6 +48,8 @@ pub const MD_CAP_EVENT_HOOK: u32 = 2;
 pub const MD_CAP_INDEX_STORE: u32 = 3;
 pub const MD_CAP_SERVICE: u32 = 4;
 pub const MD_CAP_REMOTE_NODE: u32 = 5;
+/// HTTP routes under a path prefix, mounted into the core's HTTP server (ABI 0.7).
+pub const MD_CAP_HTTP_ROUTES: u32 = 6;
 
 /// Log levels for `MdHostApi::log`.
 pub const MD_LOG_ERROR: u32 = 1;
@@ -109,7 +113,9 @@ pub struct MdReadStream {
     pub vtable: *const MdReadStreamVtable,
 }
 
-/// One-shot callback delivering a stream (on `MD_OK`) or an error message.
+/// One-shot callback delivering a stream (on `MD_OK`) or an error message. With `MD_OK`, `data`
+/// may carry call-specific data besides the stream (ABI 0.7: the head of an HTTP response);
+/// otherwise it is the error message.
 #[repr(C)]
 #[derive(Debug)]
 pub struct MdStreamCompletion {
@@ -118,7 +124,7 @@ pub struct MdStreamCompletion {
         ctx: *mut c_void,
         status: MdStatus,
         stream: MdReadStream,
-        error: MdBuffer,
+        data: MdBuffer,
     ),
 }
 
@@ -162,7 +168,8 @@ pub struct MdHostApi {
     /// `destination` node → ingest outcome), `authorize` (`permission`), `permissions` (→ the
     /// caller's permissions on the node), `submit_job` (`kind` → the queued job). Others:
     /// `nodes` and `peers` (`null` → the configured nodes / peers), `job_progress` (`{"job",
-    /// "progress"}` → `true`, or `false` once the job was cancelled). Unknown
+    /// "progress"}` → `true`, or `false` once the job was cancelled), `authenticate` (`{"secret"}`
+    /// → the user name of a session or API token, or `null`; ABI 0.7). Unknown
     /// methods fail with `MD_UNSUPPORTED`; all fail with `MD_UNAVAILABLE` until the archive is
     /// ready.
     pub call: unsafe extern "C" fn(
@@ -180,17 +187,6 @@ pub struct MdHostApi {
         cancel: MdCancel,
         done: MdStreamCompletion,
     ),
-}
-
-/// Information returned by `medicus_addon_init`. Must stay valid for the lifetime of the process.
-#[repr(C)]
-#[derive(Debug)]
-pub struct MdAddonInfo {
-    pub size: usize,
-    pub name: MdStr,
-    pub version: MdStr,
-    /// `<arch>-<os>`, compared against the host's.
-    pub target: MdStr,
 }
 
 /// Optional byte range `[start, end)`.
@@ -293,6 +289,28 @@ pub struct MdRemoteNodeVtable {
     pub destroy: unsafe extern "C" fn(instance: *mut c_void),
 }
 
+/// `MD_CAP_HTTP_ROUTES` (ABI 0.7): HTTP routes, registered under their path prefix (e.g. `/`),
+/// which the core mounts into its HTTP server. The core buffers the request body; the response
+/// body is streamed.
+#[repr(C)]
+#[derive(Debug)]
+pub struct MdHttpRoutesVtable {
+    pub size: usize,
+    /// Handles a request. `request` is JSON `{"method", "path", "query"?, "headers": [[name,
+    /// value], ...], "remote_addr", "principal"?}` (see `medicus_core::capability::HttpRequest`),
+    /// `body` the whole request body; both are valid during this call only. Completes with the
+    /// response body as the stream and its head as `data`: JSON `{"status", "headers": [[name,
+    /// value], ...]}`.
+    pub handle: unsafe extern "C" fn(
+        instance: *mut c_void,
+        request: MdStr,
+        body: MdStr,
+        cancel: MdCancel,
+        done: MdStreamCompletion,
+    ),
+    pub destroy: unsafe extern "C" fn(instance: *mut c_void),
+}
+
 /// `MD_CAP_SERVICE`: a background service (e.g. a network listener) the host starts once the
 /// archive is ready and stops at shutdown. Results are empty.
 #[repr(C)]
@@ -306,5 +324,16 @@ pub struct MdServiceVtable {
 
 /// Signature of the exported `medicus_addon_abi_version` symbol.
 pub type MdAbiVersionFn = unsafe extern "C" fn() -> u32;
-/// Signature of the exported `medicus_addon_init` symbol. Returns NULL on failure.
-pub type MdInitFn = unsafe extern "C" fn(host: *const MdHostApi) -> *const MdAddonInfo;
+/// Signature of the exported `medicus_addon_manifest` symbol (ABI 0.7): the addon's manifest as
+/// UTF-8 JSON, valid for the lifetime of the process. The host reads it before `medicus_addon_init`
+/// and without a host API, so it must not depend on initialization:
+/// `{"name", "version", "target": "<arch>-<os>", "provides": ["blob_store" | "event_hook" |
+/// "index_store" | "service" | "remote_node" | "http_routes", ...], "requires": [{"capability",
+/// "addon"?}, ...], "required": bool, "config_schema"?: <JSON Schema of the configuration>}` (see
+/// `medicus_core::addon::AddonManifest`). Registering a capability kind
+/// not listed in `provides` is refused.
+pub type MdManifestFn = unsafe extern "C" fn() -> MdStr;
+/// Signature of the exported `medicus_addon_init` symbol: registers the addon's capabilities.
+/// Returns `MD_OK`, or another status after logging why initialization failed (ABI 0.7; before,
+/// it returned the addon's information).
+pub type MdInitFn = unsafe extern "C" fn(host: *const MdHostApi) -> MdStatus;

@@ -10,7 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::AeTitle;
 use crate::event::Origin;
 
-/// What a caller may do on a node.
+/// The cookie that carries a browser session of the server (ADR-0004 §5). Protocol addons that
+/// serve browsers accept it, like API tokens, through the host's `authenticate`.
+pub const SESSION_COOKIE: &str = "medicus_session";
+
+/// What a caller may do on a node, or (the `admin.*` permissions) on the server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Permission {
@@ -22,10 +26,52 @@ pub enum Permission {
     Store,
     /// Starting transfers from the node to elsewhere (C-MOVE destination, send jobs).
     Send,
+    /// Server status, addons and settings; restarting the server.
+    #[serde(rename = "admin.system")]
+    AdminSystem,
+    /// Managing user accounts.
+    #[serde(rename = "admin.users")]
+    AdminUsers,
+    /// Reading and cancelling jobs.
+    #[serde(rename = "admin.jobs")]
+    AdminJobs,
+    /// Listing peers and checking their connectivity.
+    #[serde(rename = "admin.peers")]
+    AdminPeers,
+    /// Reading the event log and stream.
+    #[serde(rename = "admin.events")]
+    AdminEvents,
 }
 
 impl Permission {
-    pub const ALL: [Self; 4] = [Self::Query, Self::Retrieve, Self::Store, Self::Send];
+    /// The permissions on a node's data.
+    pub const DATA: [Self; 4] = [Self::Query, Self::Retrieve, Self::Store, Self::Send];
+    /// The permissions on the server. They are granted on all nodes (`*`) only.
+    pub const ADMIN: [Self; 5] = [
+        Self::AdminSystem,
+        Self::AdminUsers,
+        Self::AdminJobs,
+        Self::AdminPeers,
+        Self::AdminEvents,
+    ];
+
+    pub fn is_admin(self) -> bool {
+        Self::ADMIN.contains(&self)
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Query => "query",
+            Self::Retrieve => "retrieve",
+            Self::Store => "store",
+            Self::Send => "send",
+            Self::AdminSystem => "admin.system",
+            Self::AdminUsers => "admin.users",
+            Self::AdminJobs => "admin.jobs",
+            Self::AdminPeers => "admin.peers",
+            Self::AdminEvents => "admin.events",
+        }
+    }
 }
 
 /// On whose behalf, and through which node, a protocol addon calls the host.

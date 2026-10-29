@@ -15,14 +15,15 @@ const TYPES: &[&str] = &[
     "MdReadStream",
     "MdStreamCompletion",
     "MdHostApi",
-    "MdAddonInfo",
     "MdRange",
     "MdBlobStoreVtable",
     "MdEventHookVtable",
     "MdIndexStoreVtable",
     "MdServiceVtable",
     "MdRemoteNodeVtable",
+    "MdHttpRoutesVtable",
     "MdAbiVersionFn",
+    "MdManifestFn",
     "MdInitFn",
     "MdStatus",
 ];
@@ -42,7 +43,7 @@ fn generate() -> String {
                 .into(),
         ),
         trailer: Some(
-            "/* Marks the two entry points as exported from the shared library. */\n\
+            "/* Marks the entry points as exported from the shared library. */\n\
              #if defined(_WIN32)\n\
              #define MEDICUS_ADDON_EXPORT __declspec(dllexport)\n\
              #else\n\
@@ -51,7 +52,8 @@ fn generate() -> String {
              #ifdef __cplusplus\nextern \"C\" {\n#endif\n\n\
              /* Entry points every addon exports. */\n\
              MEDICUS_ADDON_EXPORT uint32_t medicus_addon_abi_version(void);\n\
-             MEDICUS_ADDON_EXPORT const MdAddonInfo *medicus_addon_init(const MdHostApi *host);\n\n\
+             MEDICUS_ADDON_EXPORT MdStr medicus_addon_manifest(void);\n\
+             MEDICUS_ADDON_EXPORT MdStatus medicus_addon_init(const MdHostApi *host);\n\n\
              #ifdef __cplusplus\n}  /* extern \"C\" */\n#endif\n\n\
              #endif  /* MEDICUS_ADDON_H */"
                 .into(),

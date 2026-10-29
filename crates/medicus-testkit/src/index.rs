@@ -131,6 +131,8 @@ pub async fn suite(index: &dyn IndexStore) {
     deletion(index).await;
     counters_match_recount(index).await;
     jobs(index).await;
+    settings(index).await;
+    users_and_credentials(index).await;
     partitions(index).await;
 }
 
@@ -321,6 +323,169 @@ async fn jobs(index: &dyn IndexStore) {
             .map(|j| j.id),
         Some(second.id)
     );
+}
+
+/// Settings: revisions numbered from 1 without gaps; a stale revision is a conflict.
+async fn settings(index: &dyn IndexStore) {
+    use medicus_core::capability::SettingsRevision;
+    use time::OffsetDateTime;
+
+    let revision = |n: u64, value: u64| SettingsRevision {
+        revision: n,
+        document: json!({ "value": value }),
+        author: (n > 1).then(|| "admin".to_owned()),
+        comment: None,
+        created_at: OffsetDateTime::from_unix_timestamp(1_700_000_000 + n.cast_signed()).unwrap(),
+    };
+    assert_eq!(index.settings_current().await.unwrap(), None);
+    assert_eq!(
+        index.put_settings(&revision(2, 0)).await.unwrap_err().kind,
+        ErrorKind::Conflict,
+        "the first revision is 1"
+    );
+    for n in 1..=3 {
+        index.put_settings(&revision(n, n * 10)).await.unwrap();
+    }
+    // Two writers that both read revision 3: the second one loses.
+    index.put_settings(&revision(4, 40)).await.unwrap();
+    assert_eq!(
+        index.put_settings(&revision(4, 41)).await.unwrap_err().kind,
+        ErrorKind::Conflict
+    );
+    assert_eq!(
+        index.settings_current().await.unwrap(),
+        Some(revision(4, 40))
+    );
+    assert_eq!(
+        index.settings_revision(2).await.unwrap(),
+        Some(revision(2, 20))
+    );
+    assert_eq!(index.settings_revision(9).await.unwrap(), None);
+    let numbers = |h: Vec<SettingsRevision>| h.iter().map(|r| r.revision).collect::<Vec<_>>();
+    assert_eq!(
+        numbers(index.settings_history(10, 0).await.unwrap()),
+        [4, 3, 2, 1]
+    );
+    assert_eq!(numbers(index.settings_history(2, 1).await.unwrap()), [3, 2]);
+}
+
+/// Users and their credentials: names are unique, credentials are found by secret hash and go
+/// away with their user or once expired.
+async fn users_and_credentials(index: &dyn IndexStore) {
+    use medicus_core::capability::{Credential, CredentialKind, User};
+    use time::{Duration, OffsetDateTime};
+
+    let now = OffsetDateTime::from_unix_timestamp(1_700_000_000).unwrap();
+    let user = |name: &str| User {
+        name: name.to_owned(),
+        display_name: None,
+        password_hash: Some("$argon2id$v=19$m=19456,t=2,p=1$c2FsdA$aGFzaA".to_owned()),
+        roles: vec!["admin".to_owned()],
+        disabled: false,
+        created_at: now,
+        updated_at: now,
+    };
+    index.create_user(&user("bob")).await.unwrap();
+    index.create_user(&user("alice")).await.unwrap();
+    assert_eq!(
+        index.create_user(&user("bob")).await.unwrap_err().kind,
+        ErrorKind::AlreadyExists
+    );
+    let mut bob = user("bob");
+    bob.display_name = Some("Bob".to_owned());
+    bob.roles.clear();
+    bob.disabled = true;
+    index.update_user(&bob).await.unwrap();
+    assert_eq!(index.get_user("bob").await.unwrap(), Some(bob.clone()));
+    assert_eq!(index.get_user("carol").await.unwrap(), None);
+    assert_eq!(
+        index.update_user(&user("carol")).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    let names: Vec<_> = index
+        .list_users()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|u| u.name)
+        .collect();
+    assert_eq!(names, ["alice", "bob"]);
+
+    let credential = |user: &str, secret: &str, age: i64, expires: Option<i64>| Credential {
+        id: uuid::Uuid::now_v7(),
+        user: user.to_owned(),
+        kind: if expires.is_some() {
+            CredentialKind::Session
+        } else {
+            CredentialKind::ApiToken
+        },
+        secret_hash: secret.to_owned(),
+        name: expires.is_none().then(|| "ci".to_owned()),
+        created_at: now - Duration::minutes(age),
+        expires_at: expires.map(|m| now + Duration::minutes(m)),
+        last_used_at: None,
+    };
+    let session = credential("bob", "s1", 1, Some(60));
+    let expired = credential("bob", "s2", 2, Some(-1));
+    let token = credential("alice", "t1", 3, None);
+    for c in [&session, &expired, &token] {
+        index.put_credential(c).await.unwrap();
+    }
+    assert_eq!(
+        index
+            .put_credential(&credential("carol", "s3", 0, None))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound,
+        "credentials belong to existing users"
+    );
+    assert_eq!(
+        index
+            .put_credential(&credential("alice", "t1", 0, None))
+            .await
+            .unwrap_err()
+            .kind,
+        ErrorKind::AlreadyExists,
+        "secret hashes are unique"
+    );
+    assert_eq!(
+        index.find_credential("s1").await.unwrap(),
+        Some(session.clone())
+    );
+    assert_eq!(index.find_credential("nope").await.unwrap(), None);
+    let ids = |c: Vec<Credential>| c.iter().map(|c| c.id).collect::<Vec<_>>();
+    assert_eq!(
+        ids(index.list_credentials("bob").await.unwrap()),
+        [expired.id, session.id],
+        "oldest first"
+    );
+
+    // Replacing a credential (e.g. touching it) keeps it findable by its hash.
+    let mut touched = session.clone();
+    touched.last_used_at = Some(now);
+    index.put_credential(&touched).await.unwrap();
+    assert_eq!(index.find_credential("s1").await.unwrap(), Some(touched));
+
+    assert_eq!(index.prune_credentials(now).await.unwrap(), 1);
+    assert_eq!(index.find_credential("s2").await.unwrap(), None);
+    assert_eq!(
+        index.find_credential("t1").await.unwrap(),
+        Some(token.clone())
+    );
+
+    index.delete_credential(token.id).await.unwrap();
+    assert_eq!(
+        index.delete_credential(token.id).await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    index.delete_user("bob").await.unwrap();
+    assert_eq!(index.find_credential("s1").await.unwrap(), None);
+    assert_eq!(
+        index.delete_user("bob").await.unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert!(index.list_credentials("bob").await.unwrap().is_empty());
 }
 
 /// Maintained counters (`NumberOfStudyRelated*`, `NumberOfSeriesRelatedInstances`) must always

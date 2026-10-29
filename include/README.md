@@ -9,12 +9,13 @@ A complete, tested example is [`addons/example-c/example_c.c`](../addons/example
 
 ## 1. Building
 
-Build a shared library (`.so` / `.dylib` / `.dll`) that exports exactly two symbols, declared in
-the header with `MEDICUS_ADDON_EXPORT`:
+Build a shared library (`.so` / `.dylib` / `.dll`) that exports exactly three symbols, declared
+in the header with `MEDICUS_ADDON_EXPORT`:
 
 ```c
 MEDICUS_ADDON_EXPORT uint32_t medicus_addon_abi_version(void) { return MD_ABI_VERSION; }
-MEDICUS_ADDON_EXPORT const MdAddonInfo *medicus_addon_init(const MdHostApi *host);
+MEDICUS_ADDON_EXPORT MdStr medicus_addon_manifest(void);
+MEDICUS_ADDON_EXPORT MdStatus medicus_addon_init(const MdHostApi *host);
 ```
 
 ```sh
@@ -22,21 +23,49 @@ cc -std=c11 -shared -fPIC -fvisibility=hidden -pthread -I include my_addon.c -o 
 cl /LD /I include my_addon.c /Femy_addon.dll        # MSVC
 ```
 
-Build once per target (`<arch>-<os>`); `MdAddonInfo.target` must equal the host's, e.g.
+Build once per target (`<arch>-<os>`); the manifest's `target` must equal the host's, e.g.
 `x86_64-linux`, `aarch64-macos`, `x86_64-windows`.
+
+### Manifest file
+
+Ship a manifest file `<name>.addon.toml` next to the library. The server discovers addons in its
+`addons.search_paths` through these files, without loading any library, so an addon can be
+listed, and enabled by name, before its code ever runs. Generate it from the built library:
+
+```sh
+medicus addon manifest libmy_addon.so     # writes my-addon.addon.toml next to it
+```
+
+It repeats the embedded manifest (TOML instead of JSON) and adds the `library` path, relative to
+the file, and its `sha256`. When the addon is loaded, the server checks the checksum and refuses
+a library whose embedded manifest differs from the file.
 
 ## 2. Initialization
 
 1. The host calls `medicus_addon_abi_version()` first and rejects incompatible addons before
    anything else happens. While `MD_ABI_MAJOR` is 0, minor versions must match exactly.
-2. The host calls `medicus_addon_init(host)`. Validate `host->size >= sizeof(MdHostApi)` and
+2. The host calls `medicus_addon_manifest()` and parses the returned JSON (a constant string that
+   lives forever):
+
+   ```json
+   {"name": "my-addon", "version": "1.0.0", "target": "x86_64-linux",
+    "provides": ["blob_store"], "requires": [{"capability": "index_store"}], "required": false}
+   ```
+
+   `provides` lists the capability kinds you register (`blob_store`, `event_hook`, `index_store`,
+   `service`, `remote_node`); registering any other kind is refused with `MD_REJECTED`.
+   `requires` lists what your addon needs, optionally from a specific addon (`"addon": "name"`);
+   the host loads those providers first, and pulls them in if they are not enabled. The host
+   reads every candidate's manifest before initializing any addon, so the manifest must not
+   depend on initialization.
+3. The host calls `medicus_addon_init(host)`. Validate `host->size >= sizeof(MdHostApi)` and
    `host->abi_version`. Keep the `host` pointer: it stays valid for the rest of the process, and
    all its functions are thread-safe.
-3. Read your configuration with `host->config(host->ctx)` (JSON; release the buffer).
-4. Register each capability with `host->register_capability(ctx, kind, name, &VTABLE, instance)`.
+4. Read your configuration with `host->config(host->ctx)` (JSON; release the buffer).
+5. Register each capability with `host->register_capability(ctx, kind, name, &VTABLE, instance)`.
    The vtable must live forever (a `static const`); on `MD_OK` the host owns `instance` and calls
    the vtable's `destroy` at shutdown. On any other status the host did **not** take ownership.
-5. Return a pointer to a `MdAddonInfo` that lives forever, or `NULL` on failure (log why first).
+6. Return `MD_OK`, or another status on failure (log why first).
 
 Registration is only possible during `medicus_addon_init`. Libraries are never unloaded.
 
@@ -76,6 +105,9 @@ immediately (or after completing synchronously).
   one (see `put_on_chunk` in the example).
 - `release` may arrive while a read is still outstanding (the consumer stopped early). A stream
   you produce must still complete that read and free its resources only afterwards.
+- An `MdStreamCompletion` hands over a stream with `MD_OK`. Its `data` buffer is the error message
+  on failure; on success it is empty, except for `MD_CAP_HTTP_ROUTES`, where it carries the
+  response head (`{"status": 200, "headers": [["content-type", "text/html"]]}`).
 
 ## 6. Threading
 

@@ -13,6 +13,7 @@
 pub mod schema;
 pub mod sql;
 
+mod admin;
 mod extra;
 mod jobs;
 mod query;
@@ -26,7 +27,7 @@ use medicus_core::capability::index::{
     DeleteOutcome, DicomJsonObject, DuplicatePolicy, ExtraTag, ExtraTagState, ExtraTagStatus,
     InstanceLocation, InstanceRecord, QueryResult, ResourceUid, StoreOutcome, StoredBytes,
 };
-use medicus_core::capability::{IndexStore, Job, JobState};
+use medicus_core::capability::{Credential, IndexStore, Job, JobState, SettingsRevision, User};
 use medicus_core::event::Event;
 use medicus_core::query::Query;
 use medicus_core::uid::SopInstanceUid;
@@ -344,6 +345,7 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
         self.set_cached_extras(extras);
         Ok(())
     }
+
     async fn put_job(&self, job: &Job) -> Result<()> {
         jobs::put(&self.backend, job).await
     }
@@ -363,5 +365,61 @@ impl<B: Backend> IndexStore for SqlIndex<B> {
 
     async fn claim_job(&self, now: time::OffsetDateTime) -> Result<Option<Job>> {
         jobs::claim(&self.backend, now).await
+    }
+
+    async fn settings_current(&self) -> Result<Option<SettingsRevision>> {
+        admin::settings_current(&self.backend).await
+    }
+
+    async fn settings_revision(&self, revision: u64) -> Result<Option<SettingsRevision>> {
+        admin::settings_revision(&self.backend, revision).await
+    }
+
+    async fn settings_history(&self, limit: u32, offset: u64) -> Result<Vec<SettingsRevision>> {
+        admin::settings_history(&self.backend, limit, offset).await
+    }
+
+    async fn put_settings(&self, revision: &SettingsRevision) -> Result<()> {
+        admin::put_settings(&self.backend, revision).await
+    }
+
+    async fn create_user(&self, user: &User) -> Result<()> {
+        admin::create_user(&self.backend, user).await
+    }
+
+    async fn update_user(&self, user: &User) -> Result<()> {
+        admin::update_user(&self.backend, user).await
+    }
+
+    async fn get_user(&self, name: &str) -> Result<Option<User>> {
+        admin::get_user(&self.backend, name).await
+    }
+
+    async fn list_users(&self) -> Result<Vec<User>> {
+        admin::list_users(&self.backend).await
+    }
+
+    async fn delete_user(&self, name: &str) -> Result<()> {
+        admin::delete_user(&self.backend, name).await
+    }
+
+    async fn put_credential(&self, credential: &Credential) -> Result<()> {
+        admin::put_credential(&self.backend, credential).await
+    }
+
+    async fn find_credential(&self, secret_hash: &str) -> Result<Option<Credential>> {
+        admin::find_credential(&self.backend, secret_hash).await
+    }
+
+    async fn list_credentials(&self, user: &str) -> Result<Vec<Credential>> {
+        admin::list_credentials(&self.backend, user).await
+    }
+
+    async fn delete_credential(&self, id: uuid::Uuid) -> Result<()> {
+        admin::delete_credential(&self.backend, id).await
+    }
+
+    async fn prune_credentials(&self, now: time::OffsetDateTime) -> Result<u64> {
+        admin::prune_credentials(&self.backend, now).await
     }
 }

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use futures::TryStreamExt as _;
+use medicus_abi::ffi::{MdStatus, MdStr};
 use medicus_core::capability::{BlobStore, ByteStream};
 use medicus_core::event::{Event, EventKind, Origin};
 use medicus_core::{BlobKey, ErrorKind};
@@ -62,7 +63,7 @@ async fn exercise_blob_store(store: &dyn BlobStore) {
 #[tokio::test(flavor = "multi_thread")]
 async fn static_blob_store_roundtrip() {
     let addon = load_static(&json!(null)).unwrap();
-    assert_eq!(addon.info.name, "test-addon");
+    assert_eq!(addon.manifest.name, "test-addon");
     exercise_blob_store(store(&addon).as_ref()).await;
 }
 
@@ -136,18 +137,25 @@ async fn init_failure_and_bad_config() {
     ));
 }
 
+unsafe extern "C" fn must_not_run(_: *const medicus_abi::ffi::MdHostApi) -> MdStatus {
+    panic!("init must not be called");
+}
+
+unsafe extern "C" fn current_abi() -> u32 {
+    medicus_abi::ffi::MD_ABI_VERSION
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn abi_mismatch_is_rejected_before_init() {
     unsafe extern "C" fn future_abi() -> u32 {
         0x0001_0000
     }
-    unsafe extern "C" fn must_not_run(
-        _: *const medicus_abi::ffi::MdHostApi,
-    ) -> *const medicus_abi::ffi::MdAddonInfo {
-        panic!("init must not be called on ABI mismatch");
+    unsafe extern "C" fn manifest() -> MdStr {
+        MdStr::new(r#"{"name":"future","version":"1","target":"x"}"#)
     }
     let entry = StaticAddon {
         abi_version: future_abi,
+        manifest,
         init: must_not_run,
     };
     let err = AddonLoader::new(Handle::current()).load_static(&entry, "future", &json!(null));
@@ -155,6 +163,58 @@ async fn abi_mismatch_is_rejected_before_init() {
         Err(LoadError::AbiMismatch { found, .. }) => assert_eq!(found, "1.0"),
         other => panic!("expected AbiMismatch, got {other:?}"),
     }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn manifests_are_read_without_init() {
+    unsafe extern "C" fn wrong_target() -> MdStr {
+        MdStr::new(r#"{"name":"w","version":"1","target":"sparc-plan9"}"#)
+    }
+    unsafe extern "C" fn not_json() -> MdStr {
+        MdStr::new("{")
+    }
+    let loader = AddonLoader::new(Handle::current());
+    let prepared = loader.prepare_static(&test_addon::MEDICUS_ADDON).unwrap();
+    assert_eq!(prepared.manifest.name, "test-addon");
+    assert!(
+        prepared
+            .manifest
+            .provides_capability(medicus_core::addon::Capability::BlobStore)
+    );
+
+    let entry = |manifest| StaticAddon {
+        abi_version: current_abi,
+        manifest,
+        init: must_not_run,
+    };
+    assert!(matches!(
+        loader.prepare_static(&entry(wrong_target)),
+        Err(LoadError::TargetMismatch { .. })
+    ));
+    assert!(matches!(
+        loader.prepare_static(&entry(not_json)),
+        Err(LoadError::InvalidManifest { .. })
+    ));
+    // The configured name must match the manifest's.
+    assert!(matches!(
+        loader.load_static(&test_addon::MEDICUS_ADDON, "other", &json!(null)),
+        Err(LoadError::NameMismatch { .. })
+    ));
+}
+
+/// Registering a capability kind the manifest does not declare is refused, which fails the
+/// addon's initialization.
+#[tokio::test(flavor = "multi_thread")]
+async fn undeclared_capabilities_are_refused() {
+    fn manifest() -> medicus_core::addon::AddonManifest {
+        // Declares the event hook but not the blob store the test addon registers.
+        medicus_core::addon::AddonManifest::new("test-addon", "1")
+            .provides([medicus_core::addon::Capability::EventHook])
+    }
+    static ENTRY: StaticAddon =
+        medicus_addon_sdk::static_addon!(manifest = manifest(), init = test_addon::init);
+    let err = AddonLoader::new(Handle::current()).load_static(&ENTRY, "test-addon", &json!(null));
+    assert!(matches!(err, Err(LoadError::InitFailed(_))), "{err:?}");
 }
 
 /// Builds the test addon as a shared library and returns its path.
@@ -182,7 +242,7 @@ async fn dynamic_library() {
         .load_library(&path, "test-addon", &json!({ "panic_prefix": "boom" }))
         .unwrap();
     assert_eq!(
-        addon.info.target,
+        addon.manifest.target,
         format!("{}-{}", std::env::consts::ARCH, std::env::consts::OS)
     );
     let s = store(&addon);
@@ -204,7 +264,7 @@ async fn c_addon() {
     let addon = loader
         .load_library(path, "example-c", &json!(null))
         .unwrap();
-    assert_eq!(addon.info.name, "example-c");
+    assert_eq!(addon.manifest.name, "example-c");
     exercise_blob_store(store(&addon).as_ref()).await;
 
     assert_eq!(addon.event_hooks.len(), 1);
@@ -227,4 +287,60 @@ async fn c_addon() {
         (err.kind, err.message.as_str()),
         (ErrorKind::Unavailable, "refusing test.fail")
     );
+}
+
+/// HTTP routes across the ABI: the request and body reach the addon, the head and a multi-chunk
+/// streamed body come back; errors and panics become errors.
+#[tokio::test(flavor = "multi_thread")]
+async fn http_routes() {
+    use medicus_core::capability::HttpRequest;
+    let addon = load_static(&json!(null)).unwrap();
+    assert_eq!(addon.http_routes.len(), 1);
+    assert_eq!(addon.http_routes[0].name, "/test");
+    let routes = addon.http_routes[0].value.clone();
+    let request = |path: &str, query: Option<&str>| HttpRequest {
+        method: "POST".into(),
+        path: path.into(),
+        query: query.map(Into::into),
+        headers: vec![("x-test".into(), "yes".into())],
+        remote_addr: "127.0.0.1:1".into(),
+        principal: Some("alice".into()),
+    };
+    let padding = 200_000;
+    let response = routes
+        .handle(
+            request("/test/echo", Some(&format!("padding={padding}"))),
+            bytes::Bytes::from_static(b"hello"),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.head.status, 201);
+    assert_eq!(
+        response.head.headers,
+        [("content-type".to_owned(), "application/json".to_owned())]
+    );
+    let body = read_all(response.body).await;
+    let newline = body.iter().position(|b| *b == b'\n').unwrap();
+    let echo: serde_json::Value = serde_json::from_slice(&body[..newline]).unwrap();
+    assert_eq!(
+        echo,
+        json!({ "method": "POST", "path": "/test/echo", "query": format!("padding={padding}"),
+                "principal": "alice", "header": "yes", "body": "hello" })
+    );
+    assert_eq!(body.len() - newline - 1, padding);
+
+    let err = routes
+        .handle(request("/test/fail", None), bytes::Bytes::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotFound);
+    let err = routes
+        .handle(request("/test/panic", None), bytes::Bytes::new())
+        .await
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Panicked);
+
+    // The manifest describes the configuration.
+    let schema = addon.manifest.config_schema.unwrap();
+    assert_eq!(schema["properties"]["fail_init"]["type"], "boolean");
 }

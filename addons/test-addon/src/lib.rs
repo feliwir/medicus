@@ -3,6 +3,9 @@
 //! Configuration:
 //! - `panic_prefix`: blob operations on keys starting with this prefix panic.
 //! - `fail_init`: initialization fails.
+//!
+//! HTTP routes under `/test`: `/test/fail` answers an error, `/test/panic` panics, every other path
+//! echoes the request as JSON, followed by `padding` bytes of filler (a multi-chunk body).
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -10,10 +13,11 @@ use std::sync::Mutex;
 
 use bytes::{Bytes, BytesMut};
 use futures::StreamExt as _;
-use medicus_addon_sdk::{Registrar, async_trait, export_addon};
+use medicus_addon_sdk::{AddonManifest, Capability, Registrar, async_trait, export_addon};
 use medicus_core::BlobKey;
 use medicus_core::capability::{
-    BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, StorageUsage,
+    BlobMeta, BlobStore, ByteStream, EventFilter, EventHook, HttpRequest, HttpResponse, HttpRoutes,
+    StorageUsage,
 };
 use medicus_core::event::{Event, EventKind};
 use medicus_core::{Error, ErrorKind, Result};
@@ -22,7 +26,7 @@ use serde::Deserialize;
 /// Chunk size of streams returned by `get`, small enough to exercise multi-chunk transfers.
 const CHUNK: usize = 64 * 1024;
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 #[serde(default, deny_unknown_fields)]
 struct Config {
     panic_prefix: Option<String>,
@@ -136,7 +140,47 @@ impl EventHook for TestHook {
     }
 }
 
-fn init(reg: &mut Registrar) -> Result<()> {
+struct Echo;
+
+#[async_trait]
+impl HttpRoutes for Echo {
+    async fn handle(&self, request: HttpRequest, body: Bytes) -> Result<HttpResponse> {
+        match request.path.as_str() {
+            "/test/fail" => return Err(Error::not_found("nothing at /test/fail")),
+            "/test/panic" => panic!("requested panic"),
+            _ => {}
+        }
+        let padding: usize = request
+            .query
+            .as_deref()
+            .and_then(|q| q.strip_prefix("padding="))
+            .and_then(|n| n.parse().ok())
+            .unwrap_or(0);
+        let echo = serde_json::json!({
+            "method": request.method,
+            "path": request.path,
+            "query": request.query,
+            "principal": request.principal,
+            "header": request.header("x-test"),
+            "body": String::from_utf8_lossy(&body),
+        });
+        let mut first = serde_json::to_vec(&echo).map_err(|e| Error::internal(e.to_string()))?;
+        first.push(b'\n');
+        let chunks = std::iter::once(Ok(Bytes::from(first))).chain(
+            (0..padding.div_ceil(CHUNK))
+                .map(move |i| Ok(Bytes::from(vec![b'.'; CHUNK.min(padding - i * CHUNK)]))),
+        );
+        Ok(HttpResponse {
+            head: medicus_core::capability::HttpResponseHead {
+                status: 201,
+                headers: vec![("content-type".into(), "application/json".into())],
+            },
+            body: Box::pin(futures::stream::iter(chunks.collect::<Vec<_>>())),
+        })
+    }
+}
+
+pub fn init(reg: &mut Registrar) -> Result<()> {
     let cfg: Option<Config> = reg.config()?;
     let cfg = cfg.unwrap_or_default();
     if cfg.fail_init {
@@ -150,12 +194,18 @@ fn init(reg: &mut Registrar) -> Result<()> {
         },
     )?;
     reg.register_event_hook("test-hook", TestHook)?;
+    reg.register_http_routes("/test", Echo)?;
     tracing::info!("test addon initialized");
     Ok(())
 }
 
 export_addon!(
-    name = "test-addon",
-    version = env!("CARGO_PKG_VERSION"),
+    manifest = AddonManifest::new("test-addon", env!("CARGO_PKG_VERSION"))
+        .provides([
+            Capability::BlobStore,
+            Capability::EventHook,
+            Capability::HttpRoutes
+        ])
+        .config_schema(medicus_addon_sdk::config_schema::<Config>()),
     init = init
 );

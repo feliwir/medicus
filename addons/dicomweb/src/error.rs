@@ -40,7 +40,7 @@ impl From<Error> for WebError {
         let status = match e.kind {
             ErrorKind::InvalidArgument => StatusCode::BAD_REQUEST,
             ErrorKind::NotFound => StatusCode::NOT_FOUND,
-            ErrorKind::AlreadyExists => StatusCode::CONFLICT,
+            ErrorKind::AlreadyExists | ErrorKind::Conflict => StatusCode::CONFLICT,
             ErrorKind::Rejected | ErrorKind::PermissionDenied => StatusCode::FORBIDDEN,
             ErrorKind::ResourceExhausted => StatusCode::INSUFFICIENT_STORAGE,
             ErrorKind::Unavailable => StatusCode::SERVICE_UNAVAILABLE,

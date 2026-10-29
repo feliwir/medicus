@@ -6,11 +6,13 @@
 //! - validated identifiers ([`uid`], [`AeTitle`], [`BlobKey`], [`Partition`]),
 //! - DICOM attribute addressing ([`Tag`], [`VR`]) and the standard query keys ([`tags`]),
 //! - the backend-neutral [`query`] model implementing PS3.4 C.2.2.2 matching,
-//! - the versioned [`event`] envelope.
+//! - the versioned [`event`] envelope,
+//! - the [`addon`] manifest.
 //!
 //! Every type that crosses the addon boundary has a stable serde representation.
 
 pub mod access;
+pub mod addon;
 pub mod ae;
 pub mod blob;
 pub mod capability;

@@ -27,14 +27,21 @@ dicom-transfer-syntax-registry = { version = "0.10", features = ["deflate"] }
 dicom-ul = "0.10"
 async-trait = "0.1"
 bytes = "1.10"
+arc-swap = "1"
+argon2 = "0.5"
 futures = "0.3"
 futures-core = "0.3"
+getrandom = "0.3"
+jsonschema = { version = "0.60", default-features = false }
+rpassword = "7"
+schemars = "1"
 libloading = "0.9"
 clap = { version = "4", features = ["derive", "env"] }
 figment = { version = "0.10", features = ["toml", "env"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
+toml = "0.9"
 time = { version = "0.3", features = ["serde", "formatting", "parsing", "macros"] }
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "sync", "time"] }
 tracing = "0.1"
@@ -65,6 +72,12 @@ expect_used = "warn"
 dbg_macro = "warn"
 todo = "warn"
 print_stdout = "warn"
+
+# Password hashing is slow by design; unoptimized it makes every login in tests take seconds.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
 
 [profile.release]
 lto = "thin"

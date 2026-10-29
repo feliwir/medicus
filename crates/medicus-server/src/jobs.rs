@@ -20,9 +20,9 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use crate::access::Directory;
 use crate::archive::Archive;
 use crate::config::JobsConfig;
+use crate::live::Live;
 
 /// How often due retries are looked for when nothing else wakes the scheduler.
 const POLL: Duration = Duration::from_secs(1);
@@ -31,8 +31,8 @@ const PAGE: u32 = 100;
 
 pub(crate) struct Jobs {
     archive: Arc<Archive>,
-    directory: Arc<Directory>,
-    peers: BTreeMap<String, Peer>,
+    /// The directory and the peers, as currently configured.
+    live: Arc<Live>,
     nodes: BTreeMap<String, Arc<dyn RemoteNode>>,
     cfg: JobsConfig,
     /// Running jobs whose cancellation was requested.
@@ -43,7 +43,6 @@ pub(crate) struct Jobs {
 impl std::fmt::Debug for Jobs {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Jobs")
-            .field("peers", &self.peers.keys().collect::<Vec<_>>())
             .field("protocols", &self.nodes.keys().collect::<Vec<_>>())
             .field("cfg", &self.cfg)
             .finish_non_exhaustive()
@@ -59,15 +58,13 @@ fn protocol(peer: &Peer) -> &'static str {
 impl Jobs {
     pub(crate) fn new(
         archive: Arc<Archive>,
-        directory: Arc<Directory>,
-        peers: impl IntoIterator<Item = Peer>,
+        live: Arc<Live>,
         nodes: BTreeMap<String, Arc<dyn RemoteNode>>,
         cfg: JobsConfig,
     ) -> Self {
         Self {
             archive,
-            directory,
-            peers: peers.into_iter().map(|p| (p.name.clone(), p)).collect(),
+            live,
             nodes,
             cfg,
             cancel: Mutex::new(HashSet::new()),
@@ -75,20 +72,23 @@ impl Jobs {
         }
     }
 
-    pub(crate) fn peers(&self) -> impl Iterator<Item = &Peer> {
-        self.peers.values()
+    pub(crate) fn peers(&self) -> Vec<Peer> {
+        self.live.load().peers.values().cloned().collect()
     }
 
-    /// The peer named `name` and the client for its protocol.
-    fn resolve(&self, name: &str) -> Result<(&Peer, &Arc<dyn RemoteNode>)> {
+    /// The peer named `name`, as currently configured, and the client for its protocol.
+    fn resolve(&self, name: &str) -> Result<(Peer, &Arc<dyn RemoteNode>)> {
         let peer = self
+            .live
+            .load()
             .peers
             .get(name)
+            .cloned()
             .ok_or_else(|| Error::not_found(format!("peer {name:?} is not configured")))?;
-        let node = self.nodes.get(protocol(peer)).ok_or_else(|| {
+        let node = self.nodes.get(protocol(&peer)).ok_or_else(|| {
             Error::unsupported(format!(
                 "no addon provides the {} protocol of peer {name:?}",
-                protocol(peer)
+                protocol(&peer)
             ))
         })?;
         Ok((peer, node))
@@ -96,7 +96,7 @@ impl Jobs {
 
     pub(crate) async fn echo(&self, name: &str) -> Result<()> {
         let (peer, node) = self.resolve(name)?;
-        node.echo(peer).await
+        node.echo(&peer).await
     }
 
     /// Queues a job; it runs as soon as a slot is free.
@@ -325,8 +325,8 @@ impl Jobs {
             ..JobProgress::default()
         };
         self.archive.index.put_job(job).await?;
-        let source = self.directory.node(&job.node)?.info();
-        let outcome = node.send(job.id, &source, peer, &instances).await?;
+        let source = self.live.load().directory.node(&job.node)?.info();
+        let outcome = node.send(job.id, &source, &peer, &instances).await?;
         job.progress = JobProgress {
             total: instances.len() as u64,
             completed: outcome.completed,
@@ -442,20 +442,17 @@ mod tests {
                 .unwrap();
         }
         let flaky = Arc::new(Flaky::default());
-        let peer = Peer {
-            name: "pacs".into(),
-            endpoint: Endpoint::Dimse {
+        cfg.peers.insert(
+            "pacs".into(),
+            Endpoint::Dimse {
                 ae_title: medicus_core::AeTitle::parse("PACS").unwrap(),
                 host: "127.0.0.1".into(),
                 port: 104,
             },
-        };
+        );
         let nodes = BTreeMap::from([("dimse".to_owned(), flaky.clone() as Arc<dyn RemoteNode>)]);
-        let directory = Arc::new(Directory::from_config(&cfg).unwrap());
-        (
-            Arc::new(Jobs::new(archive, directory, [peer], nodes, cfg.jobs)),
-            flaky,
-        )
+        let live = Arc::new(Live::from_config(&cfg).unwrap());
+        (Arc::new(Jobs::new(archive, live, nodes, cfg.jobs)), flaky)
     }
 
     fn send_study() -> JobKind {

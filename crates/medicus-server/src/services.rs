@@ -19,20 +19,39 @@ use uuid::Uuid;
 
 use crate::access::{Caller, Directory, Node};
 use crate::archive::Archive;
+use crate::auth::Accounts;
 use crate::jobs::Jobs;
+use crate::live::Live;
 
 #[derive(Debug)]
 pub(crate) struct NodeServices {
     pub(crate) archive: Arc<Archive>,
-    pub(crate) directory: Arc<Directory>,
+    /// The directory in effect; each call checks access against one snapshot of it.
+    pub(crate) live: Arc<Live>,
     pub(crate) jobs: Arc<Jobs>,
+    pub(crate) accounts: Arc<Accounts>,
+}
+
+/// The principal an addon claims for the caller (as authenticated by the protocol).
+fn claimed_principal(origin: &Origin) -> Option<&str> {
+    match origin {
+        Origin::Dicomweb {
+            principal: Some(name),
+            ..
+        }
+        | Origin::AdminApi {
+            principal: Some(name),
+            ..
+        } => Some(name),
+        _ => None,
+    }
 }
 
 impl NodeServices {
     /// Who is calling. Addons may present a job origin only for a job that is running on the
     /// context's node (its executor); anything else they claim on the core's behalf is
     /// anonymous.
-    async fn caller(&self, context: &CallContext) -> Caller<'_> {
+    async fn caller<'d>(&self, directory: &'d Directory, context: &CallContext) -> Caller<'d> {
         if let Origin::Job { job_id } = &context.origin {
             let verified = self
                 .jobs
@@ -45,33 +64,55 @@ impl NodeServices {
                 Caller::Anonymous
             };
         }
-        self.directory.caller(&context.origin, true)
+        let caller = directory.caller(&context.origin, true);
+        // A claimed principal that the settings do not define may be a user account.
+        if caller == Caller::Anonymous
+            && let Some(name) = claimed_principal(&context.origin)
+        {
+            match self.accounts.user(name).await {
+                Ok(Some(user)) => {
+                    return Caller::User {
+                        name: user.name,
+                        roles: user.roles,
+                    };
+                }
+                Ok(None) => {}
+                Err(e) => tracing::warn!(user = name, error = %e, "cannot look up the user"),
+            }
+        }
+        caller
     }
 
     /// The context's node if the caller has `permission` on it; denials are logged and published.
-    async fn require(&self, context: &CallContext, permission: Permission) -> Result<&Node> {
-        let caller = self.caller(context).await;
-        match self.directory.require(context, &caller, permission) {
+    async fn require<'d>(
+        &self,
+        directory: &'d Directory,
+        context: &CallContext,
+        permission: Permission,
+    ) -> Result<&'d Node> {
+        let caller = self.caller(directory, context).await;
+        match directory.require(context, &caller, permission) {
             Ok(node) => Ok(node),
             Err(e) => {
                 if e.kind == ErrorKind::PermissionDenied {
                     tracing::warn!(node = %context.node, %caller, ?permission, "access denied");
-                    self.publish_denial(context, permission).await;
+                    self.publish_denial(directory, context, permission).await;
                 }
                 Err(e)
             }
         }
     }
 
-    async fn publish_denial(&self, context: &CallContext, permission: Permission) {
+    async fn publish_denial(
+        &self,
+        directory: &Directory,
+        context: &CallContext,
+        permission: Permission,
+    ) {
         let mut event = Event::new(EventKind::AccessDenied, context.origin.clone())
             .with_node(context.node.clone())
             .with_detail(json!({ "permission": permission }));
-        if let Ok(partition) = self
-            .directory
-            .node(&context.node)
-            .and_then(|n| n.partition())
-        {
+        if let Ok(partition) = directory.node(&context.node).and_then(|n| n.partition()) {
             event = event.with_partition(partition.clone());
         }
         match self.archive.index.append_event(&event).await {
@@ -84,7 +125,10 @@ impl NodeServices {
 #[async_trait::async_trait]
 impl HostServices for NodeServices {
     async fn ingest(&self, context: &CallContext, data: ByteStream) -> Result<Ingested> {
-        let node = self.require(context, Permission::Store).await?;
+        let live = self.live.load();
+        let node = self
+            .require(&live.directory, context, Permission::Store)
+            .await?;
         self.archive
             .ingest_through(
                 Some(&node.name),
@@ -96,7 +140,10 @@ impl HostServices for NodeServices {
     }
 
     async fn query(&self, context: &CallContext, query: &Query) -> Result<QueryResult> {
-        let node = self.require(context, Permission::Query).await?;
+        let live = self.live.load();
+        let node = self
+            .require(&live.directory, context, Permission::Query)
+            .await?;
         self.archive.query(node.partition()?, query).await
     }
 
@@ -105,7 +152,10 @@ impl HostServices for NodeServices {
         context: &CallContext,
         resource: &ResourceUid,
     ) -> Result<Vec<InstanceLocation>> {
-        let node = self.require(context, Permission::Retrieve).await?;
+        let live = self.live.load();
+        let node = self
+            .require(&live.directory, context, Permission::Retrieve)
+            .await?;
         self.archive.index.locate(node.partition()?, resource).await
     }
 
@@ -114,7 +164,10 @@ impl HostServices for NodeServices {
         context: &CallContext,
         instance: &SopInstanceUid,
     ) -> Result<DicomJsonObject> {
-        let node = self.require(context, Permission::Retrieve).await?;
+        let live = self.live.load();
+        let node = self
+            .require(&live.directory, context, Permission::Retrieve)
+            .await?;
         self.archive.metadata(node.partition()?, instance).await
     }
 
@@ -123,7 +176,10 @@ impl HostServices for NodeServices {
         context: &CallContext,
         instance: &SopInstanceUid,
     ) -> Result<ByteStream> {
-        let node = self.require(context, Permission::Retrieve).await?;
+        let live = self.live.load();
+        let node = self
+            .require(&live.directory, context, Permission::Retrieve)
+            .await?;
         Ok(self.archive.retrieve(node.partition()?, instance).await?.1)
     }
 
@@ -133,10 +189,16 @@ impl HostServices for NodeServices {
         instance: &SopInstanceUid,
         destination: &str,
     ) -> Result<Ingested> {
-        let source = self.require(context, Permission::Retrieve).await?;
-        self.require(context, Permission::Send).await?;
+        let live = self.live.load();
+        let source = self
+            .require(&live.directory, context, Permission::Retrieve)
+            .await?;
+        self.require(&live.directory, context, Permission::Send)
+            .await?;
         let target = CallContext::new(destination, context.origin.clone());
-        let destination = self.require(&target, Permission::Store).await?;
+        let destination = self
+            .require(&live.directory, &target, Permission::Store)
+            .await?;
         let (_, data) = self.archive.retrieve(source.partition()?, instance).await?;
         self.archive
             .ingest_through(
@@ -149,13 +211,17 @@ impl HostServices for NodeServices {
     }
 
     async fn authorize(&self, context: &CallContext, permission: Permission) -> Result<()> {
-        self.require(context, permission).await.map(|_| ())
+        let live = self.live.load();
+        self.require(&live.directory, context, permission)
+            .await
+            .map(|_| ())
     }
 
     async fn permissions(&self, context: &CallContext) -> Result<Vec<Permission>> {
-        let node = self.directory.node(&context.node)?;
-        let caller = self.caller(context).await;
-        Ok(self
+        let live = self.live.load();
+        let node = live.directory.node(&context.node)?;
+        let caller = self.caller(&live.directory, context).await;
+        Ok(live
             .directory
             .permissions(&caller, &node.name)
             .into_iter()
@@ -163,15 +229,22 @@ impl HostServices for NodeServices {
     }
 
     async fn nodes(&self) -> Result<Vec<NodeInfo>> {
-        Ok(self.directory.nodes().map(Node::info).collect())
+        Ok(self.live.load().directory.nodes().map(Node::info).collect())
     }
 
     async fn peers(&self) -> Result<Vec<Peer>> {
-        Ok(self.jobs.peers().cloned().collect())
+        Ok(self.jobs.peers())
+    }
+
+    async fn authenticate(&self, secret: &str) -> Result<Option<String>> {
+        Ok(self.accounts.authenticate(secret).await?.map(|u| u.name))
     }
 
     async fn submit_job(&self, context: &CallContext, kind: JobKind) -> Result<Job> {
-        let node = self.require(context, Permission::Send).await?;
+        let live = self.live.load();
+        let node = self
+            .require(&live.directory, context, Permission::Send)
+            .await?;
         self.jobs.submit(node.partition()?, &node.name, kind).await
     }
 

@@ -3,13 +3,17 @@ use std::fmt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::Arc;
 
-use medicus_abi::bridge::{OwnedBuffer, target};
+use std::sync::OnceLock;
+
+use medicus_abi::bridge::OwnedBuffer;
 use medicus_abi::ffi::{
-    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_INDEX_STORE, MD_CAP_REMOTE_NODE,
-    MD_CAP_SERVICE, MD_OK, MdAddonInfo, MdHostApi, MdStr,
+    MD_ABI_VERSION, MD_CAP_BLOB_STORE, MD_CAP_EVENT_HOOK, MD_CAP_HTTP_ROUTES, MD_CAP_INDEX_STORE,
+    MD_CAP_REMOTE_NODE, MD_CAP_SERVICE, MD_INTERNAL, MD_INVALID_ARGUMENT, MD_OK, MD_UNSUPPORTED,
+    MdHostApi, MdStatus, MdStr,
 };
 use medicus_core::Error;
-use medicus_core::capability::{BlobStore, EventHook, IndexStore, RemoteNode, Service};
+use medicus_core::addon::AddonManifest;
+use medicus_core::capability::{BlobStore, EventHook, HttpRoutes, IndexStore, RemoteNode, Service};
 use serde::de::DeserializeOwned;
 
 use crate::{exports, logging};
@@ -117,6 +121,23 @@ impl Registrar {
         )
     }
 
+    /// Registers HTTP routes under `prefix` (e.g. `/` or `/viewer`), which the core mounts into
+    /// its HTTP server.
+    pub fn register_http_routes(
+        &mut self,
+        prefix: &str,
+        routes: impl HttpRoutes,
+    ) -> Result<(), Error> {
+        let (vtable, instance) = exports::http_routes(Arc::new(routes));
+        self.register(
+            MD_CAP_HTTP_ROUTES,
+            prefix,
+            vtable.cast(),
+            instance,
+            exports::destroy_http_routes,
+        )
+    }
+
     pub fn register_index_store(
         &mut self,
         name: &str,
@@ -159,54 +180,76 @@ impl Registrar {
     }
 }
 
+/// The manifest of an addon and its JSON, built once on first use and kept for the process
+/// lifetime (the host reads the JSON through `medicus_addon_manifest`).
+#[derive(Debug)]
+pub struct ManifestCell(OnceLock<(AddonManifest, String)>);
+
+impl ManifestCell {
+    #[allow(clippy::new_without_default)] // used in statics
+    pub const fn new() -> Self {
+        Self(OnceLock::new())
+    }
+
+    pub fn get(&'static self, build: impl FnOnce() -> AddonManifest) -> &'static AddonManifest {
+        &self.get_or_init(build).0
+    }
+
+    /// The manifest as JSON (shared implementation of the exported `medicus_addon_manifest`).
+    pub fn json(&'static self, build: impl FnOnce() -> AddonManifest) -> MdStr {
+        MdStr::new(&self.get_or_init(build).1)
+    }
+
+    fn get_or_init(
+        &'static self,
+        build: impl FnOnce() -> AddonManifest,
+    ) -> &'static (AddonManifest, String) {
+        self.0.get_or_init(|| {
+            let manifest = build();
+            // A manifest of plain strings and enums always serializes.
+            let json = serde_json::to_string(&manifest).unwrap_or_default();
+            (manifest, json)
+        })
+    }
+}
+
 /// Shared implementation of the exported `medicus_addon_init`.
 ///
 /// # Safety
 /// `host` must be null or point to a valid `MdHostApi` that lives for the rest of the process.
 pub unsafe fn init<E: fmt::Display>(
     host: *const MdHostApi,
-    name: &'static str,
-    version: &'static str,
+    manifest: &'static AddonManifest,
     init: fn(&mut Registrar) -> Result<(), E>,
-) -> *const MdAddonInfo {
+) -> MdStatus {
+    let name = manifest.name.as_str();
     let run = AssertUnwindSafe(|| {
         // SAFETY: guaranteed by the caller.
         let Some(api) = (unsafe { host.as_ref() }) else {
-            return std::ptr::null();
+            return MD_INVALID_ARGUMENT;
         };
         if api.size < size_of::<MdHostApi>() || !compatible_host(api.abi_version) {
-            return std::ptr::null();
+            return MD_UNSUPPORTED;
         }
         let host = HostRef(api);
         logging::install(host);
         let mut registrar = Registrar { host, name };
         match init(&mut registrar) {
-            Ok(()) => info(name, version),
+            Ok(()) => MD_OK,
             Err(e) => {
                 host.log(
                     medicus_abi::ffi::MD_LOG_ERROR,
                     name,
                     &format!("initialization failed: {e}"),
                 );
-                std::ptr::null()
+                MD_INTERNAL
             }
         }
     });
-    catch_unwind(run).unwrap_or(std::ptr::null())
+    catch_unwind(run).unwrap_or(medicus_abi::ffi::MD_PANICKED)
 }
 
 /// The host checks compatibility too; this guards against hosts that skip the check.
 fn compatible_host(host_version: u32) -> bool {
     medicus_abi::bridge::abi_compatible(MD_ABI_VERSION, host_version)
-}
-
-fn info(name: &'static str, version: &'static str) -> *const MdAddonInfo {
-    let target: &'static str = Box::leak(target().into_boxed_str());
-    let info = Box::leak(Box::new(MdAddonInfo {
-        size: size_of::<MdAddonInfo>(),
-        name: MdStr::new(name),
-        version: MdStr::new(version),
-        target: MdStr::new(target),
-    }));
-    std::ptr::from_ref(info)
 }

@@ -22,8 +22,8 @@ use tokio::runtime::Handle;
 use tokio::sync::oneshot;
 
 use crate::ffi::{
-    MD_ALREADY_EXISTS, MD_CANCELLED, MD_INTERNAL, MD_INVALID_ARGUMENT, MD_NOT_FOUND, MD_OK,
-    MD_PANICKED, MD_PERMISSION_DENIED, MD_REJECTED, MD_RESOURCE_EXHAUSTED, MD_UNAVAILABLE,
+    MD_ALREADY_EXISTS, MD_CANCELLED, MD_CONFLICT, MD_INTERNAL, MD_INVALID_ARGUMENT, MD_NOT_FOUND,
+    MD_OK, MD_PANICKED, MD_PERMISSION_DENIED, MD_REJECTED, MD_RESOURCE_EXHAUSTED, MD_UNAVAILABLE,
     MD_UNSUPPORTED, MdBuffer, MdCancel, MdCompletion, MdRange, MdReadStream, MdReadStreamVtable,
     MdStatus, MdStr, MdStreamCompletion,
 };
@@ -43,6 +43,7 @@ pub fn status_of(kind: ErrorKind) -> MdStatus {
         ErrorKind::Unsupported => MD_UNSUPPORTED,
         ErrorKind::Panicked => MD_PANICKED,
         ErrorKind::PermissionDenied => MD_PERMISSION_DENIED,
+        ErrorKind::Conflict => MD_CONFLICT,
         _ => MD_INTERNAL,
     }
 }
@@ -60,6 +61,7 @@ pub fn kind_of(status: MdStatus) -> ErrorKind {
         MD_UNSUPPORTED => ErrorKind::Unsupported,
         MD_PANICKED => ErrorKind::Panicked,
         MD_PERMISSION_DENIED => ErrorKind::PermissionDenied,
+        MD_CONFLICT => ErrorKind::Conflict,
         _ => ErrorKind::Internal,
     }
 }
@@ -356,18 +358,37 @@ unsafe extern "C" fn stream_complete_trampoline(
     ctx: *mut c_void,
     status: MdStatus,
     stream: MdReadStream,
-    error: MdBuffer,
+    data: MdBuffer,
 ) {
-    // SAFETY: ownership of `error` and (on success) `stream` is transferred to us.
-    let error = unsafe { OwnedBuffer::from_raw(error) };
+    // SAFETY: ownership of `data` and (on success) `stream` is transferred to us.
+    let data = unsafe { OwnedBuffer::from_raw(data) };
     let stream = (status == MD_OK && !stream.instance.is_null()).then(|| Imported(stream));
     // SAFETY: ctx is the Box<Sender> leaked in `stream_completion`, called exactly once.
     let tx = unsafe { Box::from_raw(ctx.cast::<oneshot::Sender<StreamOutcome>>()) };
-    let _ = tx.send((status, stream, error));
+    let _ = tx.send((status, stream, data));
 }
 
 #[derive(Debug)]
 pub struct StreamCompletion(oneshot::Receiver<StreamOutcome>);
+
+impl StreamCompletion {
+    /// Resolves to the stream and the data delivered with it (e.g. an HTTP response head).
+    pub async fn with_data(self) -> Result<(OwnedBuffer, ByteStream), Error> {
+        match self.0.await {
+            Ok((MD_OK, stream, data)) => Ok((
+                data,
+                stream.map_or_else(
+                    || Box::pin(futures::stream::empty()) as ByteStream,
+                    Imported::into_byte_stream,
+                ),
+            )),
+            Ok((status, _, msg)) => Err(error_from(status, &msg)),
+            Err(_) => Err(Error::internal(
+                "completion was dropped without being called",
+            )),
+        }
+    }
+}
 
 impl Future for StreamCompletion {
     type Output = Result<ByteStream, Error>;
@@ -458,15 +479,20 @@ impl StreamCompletionGuard {
         Self(Some(done))
     }
 
-    fn complete(mut self, status: MdStatus, stream: MdReadStream, error: MdBuffer) {
+    fn complete(mut self, status: MdStatus, stream: MdReadStream, data: MdBuffer) {
         if let Some(c) = self.0.take() {
             // SAFETY: completing a received completion exactly once.
-            unsafe { (c.complete)(c.ctx, status, stream, error) };
+            unsafe { (c.complete)(c.ctx, status, stream, data) };
         }
     }
 
     pub fn ok(self, stream: MdReadStream) {
         self.complete(MD_OK, stream, MdBuffer::empty());
+    }
+
+    /// Completes with a stream and call-specific data (e.g. an HTTP response head).
+    pub fn ok_with(self, stream: MdReadStream, data: MdBuffer) {
+        self.complete(MD_OK, stream, data);
     }
 
     pub fn err(self, e: &Error) {
@@ -748,6 +774,8 @@ mod tests {
             ErrorKind::Unsupported,
             ErrorKind::Internal,
             ErrorKind::Panicked,
+            ErrorKind::PermissionDenied,
+            ErrorKind::Conflict,
         ] {
             assert_eq!(kind_of(status_of(kind)), kind);
         }

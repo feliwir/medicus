@@ -86,6 +86,12 @@ async fn node_with_peers(
             config,
         },
     );
+    // A data directory of an earlier node holds its settings: replace them with this
+    // configuration's.
+    if data_dir.join("index.sqlite").exists() {
+        let store = crate::SettingsStore::open(cfg.clone()).unwrap();
+        store.put_config(&cfg).await.unwrap();
+    }
     let node = Node::open(cfg).await.unwrap();
     node.start_services().await.unwrap();
     node
@@ -824,7 +830,7 @@ async fn nodes_partitions_and_permissions() {
 
     // ...while a principal with all permissions copies it.
     let full = format!(
-        "{config}\n[roles.admin]\ngrants = [{{ nodes = [\"*\"], permissions = [\"query\", \"retrieve\", \"store\", \"send\"] }}]\n[principals.admin]\ndimse = {{ calling_ae = \"ADMIN\" }}\nroles = [\"admin\"]\n"
+        "{config}\n[roles.everything]\ngrants = [{{ nodes = [\"*\"], permissions = [\"query\", \"retrieve\", \"store\", \"send\"] }}]\n[principals.admin]\ndimse = {{ calling_ae = \"ADMIN\" }}\nroles = [\"everything\"]\n"
     );
     let port = free_port();
     let node = node_with_dimse(dir.path(), port, &full).await;
@@ -844,5 +850,61 @@ async fn nodes_partitions_and_permissions() {
     assert!(events.iter().any(|e| e.kind == EventKind::InstanceStored
         && e.node.as_deref() == Some("B")
         && e.partition.as_ref() == Some(&b)));
+    node.stop_services().await;
+}
+
+/// A node added in the settings answers C-ECHO without a restart of the server: the listener is
+/// restarted on the same port with the new AE titles.
+#[tokio::test(flavor = "multi_thread")]
+async fn nodes_added_at_runtime_are_served() {
+    let Some(bin) = dcmtk_bin() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    let port = free_port();
+    let node = node_with_dimse(dir.path(), port, "").await;
+    let echo = |called: &str| {
+        args(&[
+            "-aet",
+            "DCMTKSCU",
+            "-aec",
+            called,
+            "127.0.0.1",
+            &port.to_string(),
+        ])
+    };
+    let (_, log) = tool_log(&bin, "echoscu", echo("ADDED")).await;
+    assert!(log.contains("Called AE Title Not Recognized"), "{log}");
+
+    let (revision, mut settings) = node.settings().await;
+    settings.nodes.insert(
+        "MEDICUS".into(),
+        crate::config::NodeConfig {
+            partition: Some(medicus_core::Partition::default_partition()),
+            peer: None,
+            dimse: Some(crate::config::NodeDimseConfig {
+                ae_title: "MEDICUS".parse().unwrap(),
+            }),
+            dicomweb: None,
+        },
+    );
+    settings.nodes.insert(
+        "ADDED".into(),
+        crate::config::NodeConfig {
+            partition: Some(medicus_core::Partition::default_partition()),
+            peer: None,
+            dimse: Some(crate::config::NodeDimseConfig {
+                ae_title: "ADDED".parse().unwrap(),
+            }),
+            dicomweb: None,
+        },
+    );
+    let applied = node
+        .apply_settings(revision, settings, None, None)
+        .await
+        .unwrap();
+    assert!(applied.restart_required.is_empty());
+    for called in ["ADDED", "MEDICUS"] {
+        let (ok, log) = tool_log(&bin, "echoscu", echo(called)).await;
+        assert!(ok, "{called}: {log}");
+    }
     node.stop_services().await;
 }
