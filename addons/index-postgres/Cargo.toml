@@ -1,0 +1,28 @@
+[package]
+name = "index-postgres"
+description = "medicus IndexStore on PostgreSQL (pure-Rust driver, no system library needed)."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+schemars.workspace = true
+index-sql-common = { path = "../index-sql-common" }
+medicus-addon-sdk.workspace = true
+medicus-core.workspace = true
+
+async-trait.workspace = true
+serde.workspace = true
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "tls-rustls-ring-native-roots", "postgres", "migrate", "macros"] }
+tracing.workspace = true
+
+[dev-dependencies]
+medicus-testkit.workspace = true
+serde_json.workspace = true
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }
+uuid.workspace = true
+
+[lints]
+workspace = true

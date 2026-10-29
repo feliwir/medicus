@@ -156,8 +156,10 @@ fn exists(stmt: &mut Stmt, t: ExtraTag, cond: &mut dyn FnMut(&mut Stmt)) {
         Dialect::Sqlite => stmt.push(&format!(
             "EXISTS (SELECT 1 FROM json_each({col}, '$.m.\"{key}\"') je WHERE "
         )),
+        // COLLATE "C": range comparisons in byte order, like the hierarchy columns and `SQLite`.
         Dialect::Postgres => stmt.push(&format!(
-            "EXISTS (SELECT 1 FROM jsonb_array_elements_text({col} -> 'm' -> '{key}') AS je(value) WHERE "
+            "EXISTS (SELECT 1 FROM (SELECT value COLLATE \"C\" AS value \
+             FROM jsonb_array_elements_text({col} -> 'm' -> '{key}')) je WHERE "
         )),
     };
     cond(stmt);

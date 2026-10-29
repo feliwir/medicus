@@ -1,0 +1,4 @@
+# LF everywhere, including Windows checkouts: tests compare checked-in files (the C header, the
+# conformance statement) byte for byte with generated output.
+* text=auto eol=lf
+*.pdf binary

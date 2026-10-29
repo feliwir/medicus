@@ -818,13 +818,9 @@ async fn nodes_partitions_and_permissions() {
     assert!(log.contains("Failed") || log.contains("Warning"), "{log}");
     let b = medicus_core::Partition::parse("tenant-b").unwrap();
     let study = medicus_core::capability::index::ResourceUid::Study("1.7.1".parse().unwrap());
-    assert!(
-        node.archive
-            .index
-            .locate(&b, &study)
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        node.archive.index.locate(&b, &study).await.unwrap(),
+        [] as [medicus_core::capability::index::InstanceLocation; 0]
     );
     node.stop_services().await;
 
@@ -901,7 +897,7 @@ async fn nodes_added_at_runtime_are_served() {
         .apply_settings(revision, settings, None, None)
         .await
         .unwrap();
-    assert!(applied.restart_required.is_empty());
+    assert_eq!(applied.restart_required, [] as [&str; 0]);
     for called in ["ADDED", "MEDICUS"] {
         let (ok, log) = tool_log(&bin, "echoscu", echo(called)).await;
         assert!(ok, "{called}: {log}");

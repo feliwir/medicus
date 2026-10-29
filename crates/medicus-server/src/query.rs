@@ -289,7 +289,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(result.unfiltered.is_empty());
+        assert_eq!(result.unfiltered, [] as [medicus_core::Tag; 0]);
         assert!(!result.has_more);
         assert_eq!(
             uids(&result, tags::STUDY_INSTANCE_UID),

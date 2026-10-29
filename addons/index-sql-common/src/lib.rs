@@ -8,7 +8,8 @@
 //! Subscribers read events strictly in `seq` order and remember the last one they processed. A
 //! backend must therefore guarantee that an event with a lower `seq` is never committed *after*
 //! one with a higher `seq` became visible. `SQLite` does so trivially (one writer at a time);
-//! backends with concurrent writers must serialize event insertion (e.g. an advisory lock).
+//! backends with concurrent writers must serialize event insertion. For `PostgreSQL` the shared
+//! code takes the advisory lock [`EVENTS_LOCK_KEY`] before inserting an event.
 
 pub mod schema;
 pub mod sql;
@@ -35,6 +36,7 @@ use medicus_core::{Error, Partition, Result};
 use medicus_core::{Tag, VR};
 
 pub use sql::{Backend, Cell, CellKind, Dialect, Stmt, Tx};
+pub use write::EVENTS_LOCK_KEY;
 
 use crate::sql::TxExt as _;
 

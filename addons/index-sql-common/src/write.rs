@@ -13,7 +13,11 @@ use time::OffsetDateTime;
 
 use crate::extra;
 use crate::schema::{COLUMNS, Storage, is_computed};
-use crate::sql::{Cell, CellKind, Stmt, Tx, TxExt as _};
+use crate::sql::{Cell, CellKind, Dialect, Stmt, Tx, TxExt as _};
+
+/// `PostgreSQL` transaction-level advisory lock taken before inserting into `events` (an
+/// arbitrary constant: "mdcsevts"). Anything else appending events must take it too.
+pub const EVENTS_LOCK_KEY: i64 = 0x6d64_6373_6576_7473;
 
 pub(crate) fn micros(t: OffsetDateTime) -> i64 {
     i64::try_from(t.unix_timestamp_nanos() / 1000).unwrap_or(i64::MAX)
@@ -256,6 +260,16 @@ pub(crate) async fn append_event<T: Tx>(tx: &mut T, event: &Event) -> Result<u64
     let mut body = event.clone();
     body.seq = 0;
     let json = serde_json::to_string(&body).map_err(|e| Error::internal(e.to_string()))?;
+    if tx.dialect() == Dialect::Postgres {
+        // Event ordering requirement (see crate docs): held until commit, so events commit in
+        // `seq` order. Appending is the last write of a transaction, so this serializes only the
+        // outbox insert and commit, not the hierarchy upserts before it.
+        tx.execute(&Stmt::raw(
+            Dialect::Postgres,
+            &format!("SELECT pg_advisory_xact_lock({EVENTS_LOCK_KEY})"),
+        ))
+        .await?;
+    }
     let mut s = Stmt::new(tx.dialect());
     s.push("INSERT INTO events (id, kind, partition, time, body) VALUES ")
         .bind_list([

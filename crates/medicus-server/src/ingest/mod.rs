@@ -471,7 +471,7 @@ mod tests {
                 .kind,
             ErrorKind::InvalidArgument
         );
-        assert!(blob_files(f.dir.path()).is_empty());
+        assert_eq!(blob_files(f.dir.path()), [] as [std::path::PathBuf; 0]);
         assert_eq!(f.archive.index.last_event_seq().await.unwrap(), 0);
     }
 

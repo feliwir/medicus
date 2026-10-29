@@ -132,21 +132,52 @@ pub(crate) async fn monitor(archive: Arc<Archive>, shutdown: CancellationToken) 
 mod tests {
     use super::*;
     use crate::config::Config;
+    use medicus_core::BlobKey;
     use medicus_core::capability::index::ResourceUid;
+    use medicus_core::capability::{BlobMeta, BlobStore, ByteStream};
     use medicus_core::uid::StudyInstanceUid;
     use medicus_testkit::dicom::InstanceBuilder;
     use medicus_testkit::stream;
+
+    /// A store without physical usage information, so that only the quota counts: the free space
+    /// of the test machine's disk must not matter (CI runners can be nearly full).
+    struct QuotaOnly(Arc<dyn BlobStore>);
+
+    #[async_trait::async_trait]
+    impl BlobStore for QuotaOnly {
+        async fn put(&self, key: &BlobKey, data: ByteStream) -> Result<BlobMeta> {
+            self.0.put(key, data).await
+        }
+
+        async fn get(
+            &self,
+            key: &BlobKey,
+            range: Option<std::ops::Range<u64>>,
+        ) -> Result<ByteStream> {
+            self.0.get(key, range).await
+        }
+
+        async fn stat(&self, key: &BlobKey) -> Result<Option<BlobMeta>> {
+            self.0.stat(key).await
+        }
+
+        async fn delete(&self, key: &BlobKey) -> Result<()> {
+            self.0.delete(key).await
+        }
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn refuses_ingest_when_full_and_recovers_with_hysteresis() {
         let dir = tempfile::tempdir().unwrap();
         let mut cfg = Config::default();
         cfg.server.data_dir = dir.path().to_owned();
-        // A quota of 100 KB, measured by the index; the physical disk is far from full.
+        // A quota of 100 KB, measured by the index.
         cfg.archive.capacity.quota_bytes = Some(100_000);
         cfg.archive.capacity.critical_percent = 90.0;
         cfg.archive.capacity.resume_percent = 50.0;
-        let caps = crate::addons::load(&cfg, &tokio::runtime::Handle::current()).unwrap();
+        let mut caps = crate::addons::load(&cfg, &tokio::runtime::Handle::current()).unwrap();
+        let store = caps.blob_stores.get_mut(&cfg.archive.storage).unwrap();
+        *store = Arc::new(QuotaOnly(store.clone()));
         let archive = Archive::new(&caps, &cfg.archive).await.unwrap();
         let origin = || Origin::Internal {
             component: "test".into(),

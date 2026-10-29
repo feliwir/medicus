@@ -41,10 +41,9 @@ async fn ranges(store: &dyn BlobStore) {
     assert_eq!(r, data[1000..200_000]);
     let tail = read_all(store.get(&k, Some(299_990..300_000)).await.unwrap()).await;
     assert_eq!(tail, data[299_990..]);
-    assert!(
-        read_all(store.get(&k, Some(5..5)).await.unwrap())
-            .await
-            .is_empty()
+    assert_eq!(
+        read_all(store.get(&k, Some(5..5)).await.unwrap()).await,
+        [] as [u8; 0]
     );
     #[allow(clippy::reversed_empty_ranges)] // deliberately invalid
     let reversed = store.get(&k, Some(10..5)).await.err().unwrap();
@@ -76,10 +75,9 @@ async fn missing_and_delete(store: &dyn BlobStore) {
 async fn empty_blob(store: &dyn BlobStore) {
     let k = key("conformance/empty");
     assert_eq!(store.put(&k, stream(&[], 1)).await.unwrap().size, 0);
-    assert!(
-        read_all(store.get(&k, None).await.unwrap())
-            .await
-            .is_empty()
+    assert_eq!(
+        read_all(store.get(&k, None).await.unwrap()).await,
+        [] as [u8; 0]
     );
     assert_eq!(store.stat(&k).await.unwrap().unwrap().size, 0);
     store.delete(&k).await.unwrap();

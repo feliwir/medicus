@@ -213,6 +213,18 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn concurrent_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = Config {
+            path: dir.path().join("index.sqlite"),
+            name: "t".into(),
+            read_connections: 2,
+        };
+        let index = SqlIndex::new(SqliteBackend::open(&cfg).await.unwrap());
+        medicus_testkit::index::concurrent_writers(&index).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn extra_tags_on_empty_index() {
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config {

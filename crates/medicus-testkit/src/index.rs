@@ -215,15 +215,15 @@ async fn partitions(index: &dyn IndexStore) {
             .iter()
             .all(|r| string_values(r, tags::STUDY_INSTANCE_UID) == ["9.1"])
     );
-    assert!(
+    assert_eq!(
         index
             .locate(
                 &part(),
                 &ResourceUid::Study(StudyInstanceUid::parse("9.1").unwrap())
             )
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [medicus_core::capability::index::InstanceLocation; 0]
     );
 
     let study = ResourceUid::Study(StudyInstanceUid::parse("9.1").unwrap());
@@ -246,7 +246,10 @@ async fn partitions(index: &dyn IndexStore) {
         .await
         .unwrap();
     assert_eq!(deleted.removed.len(), 2);
-    assert!(index.locate(&a, &study).await.unwrap().is_empty());
+    assert_eq!(
+        index.locate(&a, &study).await.unwrap(),
+        [] as [medicus_core::capability::index::InstanceLocation; 0]
+    );
     assert_eq!(index.locate(&b, &study).await.unwrap().len(), 1);
     assert_eq!(
         index
@@ -308,12 +311,12 @@ async fn jobs(index: &dyn IndexStore) {
     let mut finished = claimed;
     finished.state = JobState::Succeeded;
     index.put_job(&finished).await.unwrap();
-    assert!(
+    assert_eq!(
         index
             .list_jobs(Some(JobState::Running), 10, 0)
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [medicus_core::capability::Job; 0]
     );
     assert_eq!(
         index
@@ -485,7 +488,10 @@ async fn users_and_credentials(index: &dyn IndexStore) {
         index.delete_user("bob").await.unwrap_err().kind,
         ErrorKind::NotFound
     );
-    assert!(index.list_credentials("bob").await.unwrap().is_empty());
+    assert_eq!(
+        index.list_credentials("bob").await.unwrap(),
+        [] as [medicus_core::capability::Credential; 0]
+    );
 }
 
 /// Maintained counters (`NumberOfStudyRelated*`, `NumberOfSeriesRelatedInstances`) must always
@@ -496,7 +502,10 @@ async fn counters_match_recount(index: &dyn IndexStore) {
         .await
         .unwrap()
         .rows;
-    assert!(!studies.is_empty());
+    assert_ne!(
+        studies,
+        [] as [serde_json::Map<std::string::String, serde_json::Value>; 0]
+    );
     for row in &studies {
         let uid = string_values(row, tags::STUDY_INSTANCE_UID).remove(0);
         let located = index
@@ -596,12 +605,9 @@ async fn hierarchy_and_counts(index: &dyn IndexStore) {
         (one.len(), one[0].series.as_str(), one[0].size),
         (1, "1.1.2", 1000)
     );
-    assert!(
-        index
-            .locate(&part(), &study("9.9.9"))
-            .await
-            .unwrap()
-            .is_empty()
+    assert_eq!(
+        index.locate(&part(), &study("9.9.9")).await.unwrap(),
+        [] as [medicus_core::capability::index::InstanceLocation; 0]
     );
 
     let rows = index
@@ -736,15 +742,15 @@ async fn duplicates(index: &dyn IndexStore) {
         .await
         .unwrap_err();
     assert_eq!(err.kind, ErrorKind::InvalidArgument);
-    assert!(
+    assert_eq!(
         index
             .locate(
                 &part(),
                 &ResourceUid::Study(StudyInstanceUid::parse("1.2").unwrap())
             )
             .await
-            .unwrap()
-            .is_empty()
+            .unwrap(),
+        [] as [medicus_core::capability::index::InstanceLocation; 0]
     );
 }
 
@@ -939,7 +945,10 @@ async fn events_and_cursors(index: &dyn IndexStore) {
     let mine = all.iter().find(|x| x.id == e.id).unwrap();
     assert_eq!((mine.seq, &mine.kind), (seq, &EventKind::StorageFull));
     assert_eq!(index.events_after(seq - 1, 1).await.unwrap()[0].id, e.id);
-    assert!(index.events_after(seq, 10).await.unwrap().is_empty());
+    assert_eq!(
+        index.events_after(seq, 10).await.unwrap(),
+        [] as [medicus_core::event::Event; 0]
+    );
 
     assert_eq!(index.cursor("conformance/sub").await.unwrap(), None);
     index.set_cursor("conformance/sub", 5).await.unwrap();
@@ -1094,7 +1103,7 @@ pub async fn extra_tags_on_empty_index(index: &dyn IndexStore) {
         .unwrap();
     let q = instance_query(&[(tags::SLICE_THICKNESS, VR::DS, "2.50")]);
     let res = index.query(&part(), &q).await.unwrap();
-    assert!(res.unfiltered.is_empty());
+    assert_eq!(res.unfiltered, [] as [medicus_core::Tag; 0]);
     assert_eq!(res.rows.len(), 1);
     // Extra tags are returned in their original DICOM JSON form.
     assert_eq!(
@@ -1363,4 +1372,93 @@ async fn extra_tags(index: &dyn IndexStore) {
         !row.contains_key(&tags::SLICE_THICKNESS.json_key()),
         "dropped tags are not returned"
     );
+}
+
+/// Concurrent writers while a subscriber tails the outbox: the subscriber must see every event
+/// exactly once, in `seq` order, even though it only remembers the last `seq` it read (the event
+/// ordering requirement of SQL backends). Run on an empty index.
+pub async fn concurrent_writers(index: &dyn IndexStore) {
+    const WRITERS: usize = 8;
+    const PER_WRITER: usize = 25;
+    let total = WRITERS * PER_WRITER;
+
+    let writers = futures::future::join_all((0..WRITERS).map(|w| async move {
+        for i in 0..PER_WRITER {
+            // A study per writer: writers into one study would already be serialized by its row
+            // lock, hiding a missing serialization of the outbox.
+            let r = record(
+                &format!("9.{w}"),
+                &format!("9.{w}.1"),
+                &format!("9.{w}.1.{i}"),
+                uids::CT_IMAGE_STORAGE,
+                &[],
+            );
+            index
+                .store_instance(
+                    &r,
+                    DuplicatePolicy::Reject,
+                    &event(EventKind::InstanceStored),
+                )
+                .await
+                .unwrap();
+        }
+    }));
+    let done = std::sync::atomic::AtomicBool::new(false);
+    let subscriber = async {
+        let mut seen = Vec::new();
+        let mut cursor = 0;
+        loop {
+            // Read the flag first: a drain after the writers finished must find everything.
+            let finished = done.load(std::sync::atomic::Ordering::Acquire);
+            let batch = index.events_after(cursor, 50).await.unwrap();
+            if let Some(last) = batch.last() {
+                cursor = last.seq;
+            } else if finished {
+                return seen;
+            }
+            seen.extend(batch.into_iter().map(|e| e.seq));
+            yield_now().await;
+        }
+    };
+    let ((), seen) = futures::join!(
+        async {
+            writers.await;
+            done.store(true, std::sync::atomic::Ordering::Release);
+        },
+        subscriber
+    );
+
+    assert!(
+        seen.windows(2).all(|w| w[0] < w[1]),
+        "out of order: {seen:?}"
+    );
+    assert_eq!(seen.len(), total, "the subscriber skipped events");
+    assert_eq!(index.last_event_seq().await.unwrap(), *seen.last().unwrap());
+    let q = Query::new(QueryLevel::Study).with_key(Key::universal(
+        tags::NUMBER_OF_STUDY_RELATED_INSTANCES,
+        VR::IS,
+    ));
+    let rows = index.query(&part(), &q).await.unwrap().rows;
+    assert_eq!(rows.len(), WRITERS);
+    for row in &rows {
+        assert_eq!(
+            int_value(row, tags::NUMBER_OF_STUDY_RELATED_INSTANCES),
+            Some(i64::try_from(PER_WRITER).unwrap())
+        );
+    }
+}
+
+/// Lets the writers make progress between subscriber polls (runtime-agnostic).
+async fn yield_now() {
+    let mut yielded = false;
+    futures::future::poll_fn(|cx| {
+        if yielded {
+            std::task::Poll::Ready(())
+        } else {
+            yielded = true;
+            cx.waker().wake_by_ref();
+            std::task::Poll::Pending
+        }
+    })
+    .await;
 }

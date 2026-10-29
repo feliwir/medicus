@@ -10,8 +10,8 @@ license = "MIT"
 authors = ["Stephan Vedder"]
 
 [workspace.dependencies]
-medicus-core = { path = "crates/medicus-core" }
-medicus-abi = { path = "crates/medicus-abi" }
+medicus-core = { version = "0.1.0", path = "crates/medicus-core" }
+medicus-abi = { version = "0.1.0", path = "crates/medicus-abi" }
 medicus-addon-sdk = { path = "crates/medicus-addon-sdk" }
 medicus-host = { path = "crates/medicus-host" }
 medicus-dimse = { path = "crates/medicus-dimse" }

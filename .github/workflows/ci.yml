@@ -88,6 +88,26 @@ jobs:
         env:
           MEDICUS_DCMTK_BIN: /usr/bin
 
+  # The IndexStore conformance suite on PostgreSQL (elsewhere these tests skip without a server).
+  postgres:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready --health-interval 5s --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test -p index-postgres
+        env:
+          INDEX_POSTGRES_TEST_URL: postgres://postgres:postgres@localhost:5432/postgres
+
   msrv:
     runs-on: ubuntu-latest
     steps:

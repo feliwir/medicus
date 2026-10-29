@@ -7,6 +7,15 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+# Unmaintained but without a known vulnerability or a maintained replacement upstream. Revisit when
+# dicom-rs moves off them.
+ignore = [
+    # `encoding`: dicom-encoding decodes DICOM character sets with it.
+    { id = "RUSTSEC-2021-0153", reason = "used by dicom-encoding; no alternative upstream" },
+    # `paste`: a proc-macro (build time only) under exr, which dicom-pixeldata's `image` feature
+    # enables unconditionally.
+    { id = "RUSTSEC-2024-0436", reason = "build-time proc-macro under dicom-pixeldata/image/exr" },
+]
 
 [licenses]
 version = 2
@@ -27,6 +36,11 @@ allow = [
     "CDLA-Permissive-2.0",
     # Weak copyleft, file-level only (e.g. webpki-roots data). Never modify such files in-tree.
     "MPL-2.0",
+]
+exceptions = [
+    # JPEG encoder of dicom-transfer-syntax-registry, derived from libjpeg. IJG is permissive but
+    # requires an acknowledgement in the documentation of binary distributions: see NOTICE.
+    { allow = ["IJG"], crate = "jpeg-encoder" },
 ]
 
 [bans]

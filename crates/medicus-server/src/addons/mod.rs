@@ -37,6 +37,8 @@ fn builtins() -> Vec<&'static StaticAddon> {
         &storage_fs::ADDON,
         #[cfg(feature = "builtin-index-sqlite")]
         &index_sqlite::ADDON,
+        #[cfg(feature = "builtin-index-postgres")]
+        &index_postgres::ADDON,
         #[cfg(feature = "builtin-dimse")]
         &dimse::ADDON,
         #[cfg(feature = "builtin-dicomweb")]

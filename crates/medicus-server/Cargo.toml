@@ -5,6 +5,7 @@ version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
+publish = false
 authors.workspace = true
 
 [[bin]]
@@ -16,6 +17,7 @@ default = ["builtin-admin-ui", "builtin-storage-fs", "builtin-index-sqlite", "bu
 builtin-admin-ui = ["dep:admin-ui"]
 builtin-storage-fs = ["dep:storage-fs"]
 builtin-index-sqlite = ["dep:index-sqlite"]
+builtin-index-postgres = ["dep:index-postgres"]
 builtin-dimse = ["dep:dimse"]
 builtin-dicomweb = ["dep:dicomweb"]
 builtin-events-webhook = ["dep:events-webhook"]
@@ -34,6 +36,7 @@ dicomweb = { path = "../../addons/dicomweb", optional = true }
 dimse = { path = "../../addons/dimse", optional = true }
 events-webhook = { path = "../../addons/events-webhook", optional = true }
 index-sqlite = { path = "../../addons/index-sqlite", optional = true }
+index-postgres = { path = "../../addons/index-postgres", optional = true }
 storage-fs = { path = "../../addons/storage-fs", optional = true }
 
 anyhow.workspace = true

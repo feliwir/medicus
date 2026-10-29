@@ -166,7 +166,13 @@ fn order_by(stmt: &mut Stmt, q: &Query) {
             OrderKey::Size => size_expr(q.level).map(str::to_owned),
         };
         if let Some(e) = expr {
-            terms.push(format!("{e} {}", if o.descending { "DESC" } else { "ASC" }));
+            // NULL sorts as the smallest value, as `SQLite` does by default (`PostgreSQL` does not).
+            let dir = if o.descending {
+                "DESC NULLS LAST"
+            } else {
+                "ASC NULLS FIRST"
+            };
+            terms.push(format!("{e} {dir}"));
         }
     }
     terms.push(format!("{} ASC", id_expr(q.level)));
@@ -434,7 +440,7 @@ mod tests {
         );
         assert!(sql.contains("EXISTS (SELECT 1 FROM series m WHERE m.study_fk = st.id AND (m.modality = $5 OR m.modality = $6))"), "{sql}");
         assert_eq!(c.stmt.args[1], Cell::from("doe%"));
-        assert!(c.unfiltered.is_empty());
+        assert_eq!(c.unfiltered, [] as [medicus_core::Tag; 0]);
     }
 
     #[test]

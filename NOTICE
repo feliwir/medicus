@@ -1,0 +1,8 @@
+medicus
+Copyright (c) 2026 Stephan Vedder. Licensed under the MIT License (see LICENSE).
+
+Third-party notices
+-------------------
+
+This software is based in part on the work of the Independent JPEG Group.
+(jpeg-encoder, used for JPEG transfer syntaxes, is derived from libjpeg; IJG License.)
