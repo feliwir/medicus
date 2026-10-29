@@ -2,8 +2,8 @@
 //! installed, stored as revisions in the index.
 //!
 //! The configuration file (and the `MEDICUS_*` environment) only *bootstraps* the server: it says
-//! where the data lives, where to listen and how to log, and which index to use — what is needed
-//! before the settings can be read. Its other sections are the initial settings: on the first
+//! where the data lives, where to listen and how to log, and which index store holds the state
+//! (ADR-0005) — what is needed before the settings can be read. Its other sections are the initial settings: on the first
 //! start, when the index holds no settings yet, they are imported as revision 1. After that the
 //! stored settings are in effect, and changes go through the admin API or `medicus settings
 //! import`.
@@ -16,6 +16,7 @@ use std::sync::Arc;
 
 use anyhow::{Context as _, bail};
 use medicus_core::Partition;
+use medicus_core::addon::AddonManifest;
 use medicus_core::capability::index::DuplicatePolicy;
 use medicus_core::capability::{Endpoint, IndexStore, SettingsRevision};
 use serde::{Deserialize, Serialize};
@@ -58,10 +59,13 @@ impl Default for ServerSettings {
     }
 }
 
-/// `archive` without `index`, which is part of the bootstrap.
+/// `archive`. Its `index` is optional: without it, the archive uses the state store.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ArchiveSettings {
+    /// The registered name of the archive index, if it is not the state store (ADR-0005 §3).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
     pub storage: String,
     pub duplicate_policy: DuplicatePolicy,
     pub max_header_bytes: usize,
@@ -73,6 +77,7 @@ impl Default for ArchiveSettings {
     fn default() -> Self {
         let a = crate::config::ArchiveConfig::default();
         Self {
+            index: None,
             storage: a.storage,
             duplicate_policy: a.duplicate_policy,
             max_header_bytes: a.max_header_bytes,
@@ -104,6 +109,9 @@ impl Settings {
                 name: cfg.server.name.clone(),
             },
             archive: ArchiveSettings {
+                // Without `state.index`, `archive.index` names the state store.
+                index: Some(cfg.archive.index.clone())
+                    .filter(|i| cfg.state.index.as_ref().is_some_and(|s| s != i)),
                 storage: cfg.archive.storage.clone(),
                 duplicate_policy: cfg.archive.duplicate_policy,
                 max_header_bytes: cfg.archive.max_header_bytes,
@@ -138,6 +146,9 @@ impl Settings {
     /// The effective configuration: `bootstrap` with its settings sections replaced by these.
     /// An addon keeps its `library` and `sha256` from the bootstrap; an addon the settings do not
     /// mention keeps its bootstrap entry. Settings for `bootstrap_addons` are refused.
+    ///
+    /// `state.index` is always set in the result, since `archive.index` may now name another
+    /// store.
     pub(crate) fn apply(
         &self,
         mut bootstrap: Config,
@@ -154,6 +165,9 @@ impl Settings {
             );
         }
         let cfg = &mut bootstrap;
+        let state = cfg.state_index().to_owned();
+        cfg.archive.index = self.archive.index.clone().unwrap_or_else(|| state.clone());
+        cfg.state.index = Some(state);
         cfg.server.name.clone_from(&self.server.name);
         cfg.archive.storage.clone_from(&self.archive.storage);
         cfg.archive.duplicate_policy = self.archive.duplicate_policy;
@@ -225,6 +239,68 @@ impl Settings {
             || self.access != other.access
     }
 
+    /// The settings with the secrets in addon configurations replaced by placeholders, as the
+    /// admin API and exports show them (ADR-0005 §7).
+    pub(crate) fn masked(&self, available: &BTreeMap<String, AddonManifest>) -> Self {
+        let mut out = self.clone();
+        for (name, addon) in &mut out.addons {
+            if let Some(schema) = available.get(name).and_then(|m| m.config_schema.as_ref()) {
+                crate::secrets::mask(schema, &mut addon.config);
+            }
+        }
+        out
+    }
+
+    /// Replaces the secret placeholders in addon configurations with the values in `stored`.
+    pub(crate) fn restore_secrets(
+        &mut self,
+        stored: &Self,
+        available: &BTreeMap<String, AddonManifest>,
+    ) -> anyhow::Result<()> {
+        for (name, addon) in &mut self.addons {
+            if let Some(schema) = available.get(name).and_then(|m| m.config_schema.as_ref()) {
+                let before = stored.addons.get(name).map(|a| &a.config);
+                crate::secrets::restore(
+                    schema,
+                    &mut addon.config,
+                    before.unwrap_or(&serde_json::Value::Null),
+                )
+                .map_err(|e| anyhow::anyhow!("addon {name:?}: {e}"))?;
+            }
+        }
+        Ok(())
+    }
+
+    /// Refuses addon configurations changed since `stored` that put a password into a URL
+    /// instead of a secret field: the admin API would show it.
+    pub(crate) fn check_no_password_in_urls(
+        &self,
+        stored: &Self,
+        available: &BTreeMap<String, AddonManifest>,
+    ) -> anyhow::Result<()> {
+        let no_schema = serde_json::Value::Null;
+        for (name, addon) in &self.addons {
+            if stored
+                .addons
+                .get(name)
+                .is_some_and(|a| a.config == addon.config)
+            {
+                continue;
+            }
+            let schema = available
+                .get(name)
+                .and_then(|m| m.config_schema.as_ref())
+                .unwrap_or(&no_schema);
+            if let Some(path) = crate::secrets::password_in_url(schema, &addon.config) {
+                bail!(
+                    "addon {name:?}: the URL at {path} contains a password; set it in the \
+                     addon's password field instead"
+                );
+            }
+        }
+        Ok(())
+    }
+
     fn parse(revision: &SettingsRevision) -> anyhow::Result<Self> {
         serde_json::from_value(revision.document.clone())
             .with_context(|| format!("settings revision {} is invalid", revision.revision))
@@ -267,12 +343,14 @@ pub(crate) async fn load(
     Ok((current.revision, settings))
 }
 
-/// The settings stored in a server's index, for the `medicus settings` commands. The server
+/// The settings stored in a server's state store, for the `medicus settings` commands. The server
 /// itself does not need to run.
 pub struct SettingsStore {
     index: Arc<dyn IndexStore>,
     bootstrap: Config,
     bootstrap_addons: BTreeSet<String>,
+    /// The manifests of the available addons, for their secrets.
+    available: BTreeMap<String, AddonManifest>,
     // Keeps the index addon loaded.
     _loading: crate::addons::Loading,
 }
@@ -284,12 +362,13 @@ impl std::fmt::Debug for SettingsStore {
 }
 
 impl SettingsStore {
-    /// Opens the index of the server configured by `bootstrap`.
+    /// Opens the state store of the server configured by `bootstrap`.
     pub fn open(bootstrap: Config) -> anyhow::Result<Self> {
         let loading = crate::addons::load_index(&bootstrap, &tokio::runtime::Handle::current())?;
         Ok(Self {
-            index: loading.index_store(&bootstrap.archive.index)?,
+            index: loading.state_store(&bootstrap)?,
             bootstrap_addons: loading.loaded(),
+            available: loading.manifests(),
             bootstrap,
             _loading: loading,
         })
@@ -319,19 +398,28 @@ impl SettingsStore {
         })
     }
 
+    /// `revision` with its secrets replaced by placeholders, which [`Self::put`] restores.
+    pub fn masked(&self, mut revision: SettingsRevision) -> anyhow::Result<SettingsRevision> {
+        let settings = Settings::parse(&revision)?.masked(&self.available);
+        revision.document = serde_json::to_value(settings)?;
+        Ok(revision)
+    }
+
     /// Revisions, newest first.
     pub async fn history(&self, limit: u32) -> anyhow::Result<Vec<SettingsRevision>> {
         Ok(self.index.settings_history(limit, 0).await?)
     }
 
     /// Validates `settings` and stores them as a new revision. They take effect when the server
-    /// starts next.
+    /// starts next. Secret placeholders keep the stored values.
     pub async fn put(
         &self,
         settings: &Settings,
         author: Option<String>,
         comment: Option<String>,
     ) -> anyhow::Result<SettingsRevision> {
+        let mut settings = settings.clone();
+        settings.restore_secrets(&self.current().await?, &self.available)?;
         settings.validate(&self.bootstrap, &self.bootstrap_addons)?;
         let latest = self
             .index
@@ -340,7 +428,7 @@ impl SettingsStore {
             .map_or(0, |r| r.revision);
         let revision = SettingsRevision {
             revision: latest + 1,
-            document: serde_json::to_value(settings)?,
+            document: serde_json::to_value(&settings)?,
             author,
             comment,
             created_at: OffsetDateTime::now_utc(),
@@ -424,7 +512,8 @@ mod tests {
         assert!(!settings.addons.contains_key("index-sqlite"));
         assert_eq!(settings.archive.storage, "fast");
 
-        // Applying them to a bare bootstrap yields the configuration again, libraries included.
+        // Applying them to a bare bootstrap yields the configuration again, libraries included,
+        // with the state store named explicitly.
         let mut bootstrap = Config::default();
         bootstrap.server.data_dir = cfg.server.data_dir.clone();
         bootstrap.addons.entries.insert(
@@ -440,7 +529,12 @@ mod tests {
                 config: serde_json::Value::Null,
             },
         );
-        assert_eq!(settings.apply(bootstrap, &index_addons()).unwrap(), cfg);
+        let mut expected = cfg.clone();
+        expected.state.index = Some("sqlite".into());
+        assert_eq!(
+            settings.apply(bootstrap, &index_addons()).unwrap(),
+            expected
+        );
 
         // TOML and JSON both round-trip.
         let revision = SettingsRevision {
@@ -454,6 +548,33 @@ mod tests {
             let text = format_settings(&revision, json).unwrap();
             assert_eq!(parse_settings(&text, json).unwrap(), settings, "{text}");
         }
+    }
+
+    #[test]
+    fn the_archive_index_is_a_setting_once_the_state_store_is_named() {
+        // Without `state.index`, `archive.index` names the state store: not a setting.
+        let mut cfg = Config::default();
+        cfg.archive.index = "postgres".into();
+        let settings = Settings::from_config(&cfg, &index_addons());
+        assert_eq!(settings.archive.index, None);
+        let applied = settings.apply(cfg.clone(), &index_addons()).unwrap();
+        assert_eq!(applied.state.index.as_deref(), Some("postgres"));
+        assert_eq!(applied.archive.index, "postgres");
+
+        // With it, a different `archive.index` is imported into the settings.
+        cfg.state.index = Some("sqlite".into());
+        let mut settings = Settings::from_config(&cfg, &index_addons());
+        assert_eq!(settings.archive.index.as_deref(), Some("postgres"));
+        let applied = settings.apply(Config::default(), &index_addons()).unwrap();
+        assert_eq!(
+            (applied.state_index(), applied.archive.index.as_str()),
+            ("sqlite", "postgres")
+        );
+
+        // Without `archive.index` in the settings, the archive uses the state store.
+        settings.archive.index = None;
+        let applied = settings.apply(cfg, &index_addons()).unwrap();
+        assert_eq!(applied.archive.index, "sqlite");
     }
 
     #[test]

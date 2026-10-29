@@ -458,6 +458,8 @@ async fn system(State(s): State<AppState>, auth: Auth) -> ApiResult<Json<serde_j
     Ok(Json(json!({
         "settings_revision": revision,
         "restart_required": restart_required,
+        // Set when the archive index is unavailable (ADR-0005 §3).
+        "degraded": s.node.degraded,
         "name": s.name,
         "version": env!("CARGO_PKG_VERSION"),
         "abi_version": medicus_abi_version(),
@@ -1189,6 +1191,179 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn an_unavailable_archive_index_degrades_the_server() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut cfg = Config::default();
+        cfg.server.data_dir = dir.path().to_owned();
+        cfg.state.index = Some("sqlite".into());
+        cfg.archive.index = "postgres".into();
+        cfg.addons.entries.insert(
+            "index-postgres".into(),
+            crate::config::AddonEntry {
+                enabled: true,
+                library: None,
+                sha256: None,
+                // Nothing listens on port 1.
+                config: json!({
+                    "url": "postgres://medicus@127.0.0.1:1/medicus",
+                    "connect_timeout_secs": 1,
+                }),
+            },
+        );
+        let (mut app, _) = app_in_setup(cfg, None).await;
+        app.accounts
+            .create_user("root", None, vec![crate::access::ADMIN_ROLE.into()], None)
+            .await
+            .unwrap();
+        app.token = Some(
+            app.accounts
+                .create_token("root", None, None)
+                .await
+                .unwrap()
+                .secret,
+        );
+
+        // The admin API works and says why the archive does not.
+        let (status, system) = call(&app, request("GET", "/api/v1/system")).await;
+        assert_eq!(status, StatusCode::OK, "{system}");
+        assert_eq!(system["degraded"]["index"], "postgres");
+        let error = system["degraded"]["error"].as_str().unwrap();
+        assert!(error.contains("index-postgres"), "{error}");
+        assert!(error.contains("postgres: "), "the addon's reason: {error}");
+        let (status, body) = call(&app, request("GET", "/api/v1/settings")).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(body["settings"]["archive"]["index"], "postgres");
+
+        // The archive is unavailable.
+        assert_eq!(
+            call(&app, request("GET", "/health/ready")).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(
+            call(&app, request("GET", "/api/v1/events?since=0")).await.0,
+            StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        // Pointing the archive back at the state store is the way out.
+        let mut settings = body["settings"].clone();
+        settings["archive"].as_object_mut().unwrap().remove("index");
+        let mut req = json_request("PUT", "/api/v1/settings", &settings);
+        req.headers_mut()
+            .insert(header::IF_MATCH, "1".parse().unwrap());
+        let (status, body) = call(&app, req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], json!(["archive"]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn secrets_are_never_returned() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, _) = app(dir.path()).await;
+        let hook = json!({
+            "hooks": [{ "name": "h", "url": "http://127.0.0.1:1/", "secret": "s3cret" }],
+        });
+        let (status, body) = call(
+            &app,
+            json_request(
+                "PUT",
+                "/api/v1/addons/events-webhook",
+                &json!({ "config": hook }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+
+        // Neither the settings, nor the revision, nor the addon list show it.
+        let secret = json!({ "$secret": true });
+        let (_, body) = call(&app, request("GET", "/api/v1/settings")).await;
+        let mut settings = body["settings"].clone();
+        let config = &settings["addons"]["events-webhook"]["config"];
+        assert_eq!(config["hooks"][0]["secret"], secret);
+        assert_eq!(config["hooks"][0]["headers"], json!(null));
+        let (_, revision) = call(&app, request("GET", "/api/v1/settings/revisions/2")).await;
+        assert_eq!(
+            revision["settings"]["addons"]["events-webhook"]["config"]["hooks"][0]["secret"],
+            secret
+        );
+        let (_, addons) = call(&app, request("GET", "/api/v1/addons")).await;
+        assert!(!addons.to_string().contains("s3cret"), "{addons}");
+
+        // Sending the placeholder back keeps the secret.
+        settings["addons"]["events-webhook"]["config"]["hooks"][0]["url"] =
+            json!("http://127.0.0.1:2/");
+        let mut req = json_request("PUT", "/api/v1/settings", &settings);
+        req.headers_mut()
+            .insert(header::IF_MATCH, "2".parse().unwrap());
+        let (status, body) = call(&app, req).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        let (current, _) = app.node.settings().await;
+        assert_eq!(current, 3);
+        let stored = &app.node.settings().await.1.addons["events-webhook"].config;
+        assert_eq!(stored["hooks"][0]["secret"], "s3cret");
+        assert_eq!(stored["hooks"][0]["url"], "http://127.0.0.1:2/");
+
+        // A password belongs in a secret field, not in a URL.
+        let pg = json!({ "config": { "url": "postgres://medicus:pw@db.example/medicus" } });
+        let (status, body) = call(
+            &app,
+            json_request("PUT", "/api/v1/addons/index-postgres", &pg),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["message"].as_str().unwrap().contains("/url"), "{body}");
+        let pg = json!({
+            "config": { "url": "postgres://medicus@db.example/medicus", "password": "pw" },
+        });
+        let (status, body) = call(
+            &app,
+            json_request("PUT", "/api/v1/addons/index-postgres", &pg),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn the_archive_index_changes_only_while_the_archive_is_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let (app, archive) = app(dir.path()).await;
+        let (_, body) = call(&app, request("GET", "/api/v1/settings")).await;
+        let mut settings = body["settings"].clone();
+        let put = |settings: &serde_json::Value, rev: u64| {
+            let mut req = json_request("PUT", "/api/v1/settings", settings);
+            req.headers_mut()
+                .insert(header::IF_MATCH, rev.to_string().parse().unwrap());
+            req
+        };
+
+        // The index must be registered by an enabled addon.
+        settings["archive"]["index"] = json!("postgres");
+        let (status, body) = call(&app, put(&settings, 1)).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body["message"].as_str().unwrap().contains("archive.index"),
+            "{body}"
+        );
+        settings["addons"]["index-postgres"] =
+            json!({ "config": { "url": "postgres://db.example/medicus" } });
+        let (status, body) = call(&app, put(&settings, 1)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+        assert_eq!(body["restart_required"], json!(["archive", "addons"]));
+
+        // Once the archive holds an instance, it stays on its index.
+        ingest(&archive, "1.2.3.1.1").await;
+        settings["archive"]["index"] = json!("other");
+        settings["addons"]["index-postgres"]["config"]["name"] = json!("other");
+        let (status, body) = call(&app, put(&settings, 2)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{body}");
+        assert_eq!(body["error"], "archive_not_empty");
+
+        // Returning to the index the archive runs on is fine.
+        settings["archive"].as_object_mut().unwrap().remove("index");
+        let (status, body) = call(&app, put(&settings, 2)).await;
+        assert_eq!(status, StatusCode::OK, "{body}");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn addon_endpoints() {
         let dir = tempfile::tempdir().unwrap();
         let (app, _) = app(dir.path()).await;
@@ -1247,6 +1422,20 @@ mod tests {
             (json!(true), json!(true))
         );
         assert_eq!(dimse["config"]["listen"], "127.0.0.1:0");
+
+        // An addon with required configuration cannot be enabled without it: it would fail to
+        // load at the next start.
+        let (status, body) = call(
+            &app,
+            json_request(
+                "PUT",
+                "/api/v1/addons/index-postgres",
+                &json!({ "enabled": true }),
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body["message"].as_str().unwrap().contains("url"), "{body}");
     }
 
     #[tokio::test(flavor = "multi_thread")]

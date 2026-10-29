@@ -1,9 +1,10 @@
 //! Server configuration: a TOML file layered with `MEDICUS_*` environment variables.
 //!
-//! The configuration bootstraps the server: `server.data_dir`, `http`, `log`, `archive.index`, the
-//! addon libraries (`library`, `sha256`, `search_paths`) and the index addon's entry are read on
-//! every start. All other sections are settings ([`crate::settings`]): they are imported into the
-//! index on the first start and ignored afterwards.
+//! The configuration bootstraps the server: `server.data_dir`, `http`, `log`, the state store
+//! (`state.index`, ADR-0005), the addon libraries (`library`, `sha256`, `search_paths`) and the
+//! state store addon's entry are read on every start. All other sections are settings
+//! ([`crate::settings`]): they are imported into the state store on the first start and ignored
+//! afterwards.
 //!
 //! Nested keys use `__` in environment variables, e.g. `MEDICUS_HTTP__LISTEN=0.0.0.0:8042`.
 //! Unknown keys are rejected so that typos do not silently fall back to defaults.
@@ -25,6 +26,7 @@ pub struct Config {
     pub server: ServerConfig,
     pub http: HttpConfig,
     pub log: LogConfig,
+    pub state: StateConfig,
     pub archive: ArchiveConfig,
     pub addons: AddonsConfig,
     /// Remote nodes by name, e.g. `[peers.pacs] protocol = "dimse", ae_title = "PACS", ...`.
@@ -143,7 +145,8 @@ impl Default for JobsConfig {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ArchiveConfig {
-    /// Registered name of the index to use.
+    /// Registered name of the index to use. Without `state.index`, it is also the state store and
+    /// part of the bootstrap; with it, it is a setting.
     pub index: String,
     /// Registered name of the blob store new instances are written to.
     pub storage: String,
@@ -231,6 +234,15 @@ impl ExtraTagConfig {
             level: self.level,
         })
     }
+}
+
+/// The state store (ADR-0005): the index store that holds the settings, users and credentials.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct StateConfig {
+    /// Its registered name; default: `archive.index`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub index: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -333,6 +345,11 @@ pub enum ConfigError {
 }
 
 impl Config {
+    /// The registered name of the state store.
+    pub(crate) fn state_index(&self) -> &str {
+        self.state.index.as_deref().unwrap_or(&self.archive.index)
+    }
+
     /// Loads defaults, then `file` (if given), then `MEDICUS_*` environment variables.
     pub fn load(file: Option<&Path>) -> Result<Self, ConfigError> {
         Self::figment(file)?

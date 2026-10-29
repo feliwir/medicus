@@ -42,8 +42,12 @@ pub enum LoadError {
         found: String,
         expected: String,
     },
-    #[error("addon {0} failed to initialize (see its log output)")]
-    InitFailed(String),
+    /// `reason` is the last error the addon logged while initializing.
+    #[error("addon {addon} failed to initialize: {}", reason.as_deref().unwrap_or("see its log output"))]
+    InitFailed {
+        addon: String,
+        reason: Option<String>,
+    },
     #[error("addon {addon} has an invalid manifest: {reason}")]
     InvalidManifest { addon: String, reason: String },
     #[error("addon configured as {configured:?} calls itself {found:?} in its manifest")]
@@ -248,7 +252,15 @@ impl AddonLoader {
         );
         if status != MD_OK {
             self.discard(&addon.manifest, registrations);
-            return Err(LoadError::InitFailed(name.to_owned()));
+            let reason = ctx
+                .init_error
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .take();
+            return Err(LoadError::InitFailed {
+                addon: name.to_owned(),
+                reason,
+            });
         }
         let mut loaded = LoadedAddon {
             manifest: addon.manifest.clone(),

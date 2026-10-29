@@ -76,7 +76,8 @@ Until now:
   - the index addon and its configuration;
   - addon search paths, library paths and checksums.
   Choosing the index backend is a deployment decision, not a UI setting: the settings are stored in
-  it.
+  it. *Amended by ADR-0005: the bootstrap chooses only the state store (settings, users,
+  credentials); the archive's index is a setting.*
 - **Settings** are one document, stored in the index as numbered **revisions** (author, time). It
   holds:
   - each addon's enabled flag and configuration;

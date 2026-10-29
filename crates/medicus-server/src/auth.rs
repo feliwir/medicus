@@ -111,6 +111,13 @@ pub(crate) struct Accounts {
     setup_token: Mutex<Option<String>>,
 }
 
+impl Accounts {
+    /// The state store the accounts live in; it also holds the settings.
+    pub(crate) fn state(&self) -> &Arc<dyn IndexStore> {
+        &self.index
+    }
+}
+
 impl std::fmt::Debug for Accounts {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Accounts")
@@ -397,7 +404,7 @@ impl Accounts {
     }
 }
 
-/// User accounts in a server's index, for the `medicus users` commands. The server itself does
+/// User accounts in a server's state store, for the `medicus users` commands. The server itself does
 /// not need to run.
 #[derive(Debug)]
 pub struct UserStore {
@@ -430,7 +437,7 @@ impl From<User> for UserSummary {
 }
 
 impl UserStore {
-    /// Opens the index of the server configured by `bootstrap`.
+    /// Opens the state store of the server configured by `bootstrap`.
     pub async fn open(bootstrap: crate::Config) -> anyhow::Result<Self> {
         let store = crate::SettingsStore::open(bootstrap)?;
         Ok(Self {

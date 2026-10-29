@@ -59,6 +59,8 @@ export interface SystemInfo {
   storage: string;
   settings_revision: number;
   restart_required: string[];
+  /** Set when the archive index is unavailable: only the admin UI and API work (ADR-0005). */
+  degraded?: { index: string; error: string } | null;
   addons: AddonStatus[];
 }
 
@@ -149,7 +151,15 @@ export interface JsonSchema {
   $ref?: string;
   $defs?: Record<string, JsonSchema>;
   additionalProperties?: boolean | JsonSchema;
+  /** A secret: the API shows `{"$secret": true}` instead of its value. */
+  writeOnly?: boolean;
 }
+
+/** What the API shows in place of a stored secret; sent back, it keeps the secret. */
+export const SECRET = { $secret: true } as const;
+
+export const isSecret = (v: unknown): boolean =>
+  typeof v === "object" && v !== null && (v as Record<string, unknown>).$secret === true;
 
 export interface TokenInfo {
   id: string;

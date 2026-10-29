@@ -109,6 +109,10 @@ enum SettingsCommand {
         /// Print JSON instead of TOML.
         #[arg(long)]
         json: bool,
+        /// Include the secrets of addon configurations, e.g. for a backup. Without it they are
+        /// placeholders, which `import` replaces with the stored values.
+        #[arg(long)]
+        with_secrets: bool,
     },
     /// Validate a settings file (TOML, or JSON if it ends in `.json`) and store it as a new
     /// revision. It takes effect when the server starts next.
@@ -207,7 +211,7 @@ const RESTART_EXIT_CODE: i32 = 75;
 /// Starts the server again after a requested restart. On Unix the process replaces itself with
 /// the executable at its path (after an upgrade, the new one), keeping its arguments and
 /// environment; file descriptors are closed on exec. Elsewhere it exits with
-/// [`RESTART_EXIT_CODE`].
+/// `RESTART_EXIT_CODE` (75).
 fn restart() -> anyhow::Result<()> {
     #[cfg(unix)]
     {
@@ -292,11 +296,20 @@ async fn users(cfg: Config, command: UsersCommand) -> anyhow::Result<String> {
 async fn settings(cfg: Config, command: SettingsCommand) -> anyhow::Result<String> {
     let store = SettingsStore::open(cfg)?;
     match command {
-        SettingsCommand::Export { revision, json } => {
+        SettingsCommand::Export {
+            revision,
+            json,
+            with_secrets,
+        } => {
             let found = store.get(revision).await?.with_context(|| match revision {
                 Some(n) => format!("there is no settings revision {n}"),
                 None => "no settings are stored yet (the server has not started)".into(),
             })?;
+            let found = if with_secrets {
+                found
+            } else {
+                store.masked(found)?
+            };
             medicus_server::format_settings(&found, json)
         }
         SettingsCommand::Import { file, comment } => {

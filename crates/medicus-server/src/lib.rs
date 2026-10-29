@@ -11,6 +11,7 @@ mod capacity;
 mod config;
 #[cfg(test)]
 mod dcmtk_tests;
+mod degraded;
 #[cfg(test)]
 mod dicomweb_tests;
 mod events;
@@ -21,6 +22,7 @@ mod live;
 mod proxy;
 mod query;
 mod routes;
+mod secrets;
 mod services;
 mod settings;
 
@@ -70,12 +72,14 @@ pub struct Node {
     pub archive: Arc<Archive>,
     live: Arc<live::Live>,
     jobs: Arc<jobs::Jobs>,
+    /// Users and credentials, in the state store (ADR-0005), which also holds the settings.
     accounts: Arc<auth::Accounts>,
     caps: addons::Capabilities,
     /// The configuration file, and the effective configuration the node started with.
     bootstrap: Config,
     cfg: Config,
-    /// The index providers, configured by the bootstrap rather than the settings.
+    /// The index providers the bootstrap configures (the state store's), rather than the
+    /// settings.
     index_addons: BTreeSet<String>,
     /// Serializes changes to the settings.
     settings: tokio::sync::Mutex<SettingsState>,
@@ -83,6 +87,38 @@ pub struct Node {
     restart: CancellationToken,
     /// The `dicomweb` addon's listener, for the `DICOMweb` proxy.
     dicomweb: Option<proxy::Upstream>,
+    /// Set if the archive index is unavailable: the archive's operations fail, and the services
+    /// and background tasks do not run (ADR-0005 §3).
+    degraded: Option<degraded::Degraded>,
+}
+
+/// Opens the archive on its index. If that is not the state store and it cannot be opened — its
+/// addon failed to load, or the index fails — the archive is opened degraded instead.
+async fn open_archive(
+    caps: &mut addons::Capabilities,
+    cfg: &Config,
+) -> anyhow::Result<(Archive, Option<degraded::Degraded>)> {
+    let failure = match caps.index_failure.take() {
+        Some(e) => e,
+        None => match Archive::new(caps, &cfg.archive).await {
+            Ok(archive) => return Ok((archive, None)),
+            // Failures of the index's calls, not of the configuration.
+            Err(e)
+                if cfg.archive.index != cfg.state_index()
+                    && e.downcast_ref::<medicus_core::Error>().is_some() =>
+            {
+                e
+            }
+            Err(e) => return Err(e),
+        },
+    };
+    let degraded = degraded::Degraded {
+        index: cfg.archive.index.clone(),
+        error: format!("{failure:#}"),
+    };
+    let index = Arc::new(degraded::UnavailableIndex::new(&degraded));
+    let archive = Archive::degraded(caps, &cfg.archive, index)?;
+    Ok((archive, Some(degraded)))
 }
 
 #[derive(Debug)]
@@ -112,18 +148,25 @@ pub enum Exit {
 }
 
 impl Node {
-    /// Loads the index, reads the settings from it (importing them from `bootstrap` on the first
-    /// start), then loads the other addons and wires the archive.
+    /// Loads the state store, reads the settings from it (importing them from `bootstrap` on the
+    /// first start), then loads the other addons, including the archive index, and wires the
+    /// archive.
     pub async fn open(bootstrap: Config) -> anyhow::Result<Self> {
         let loading = addons::load_index(&bootstrap, &tokio::runtime::Handle::current())?;
-        let index = loading.index_store(&bootstrap.archive.index)?;
+        let state = loading.state_store(&bootstrap)?;
         let index_addons = loading.loaded();
-        let (revision, settings) = settings::load(&*index, &bootstrap, &index_addons).await?;
+        let (revision, settings) = settings::load(&*state, &bootstrap, &index_addons).await?;
         let cfg = settings.apply(bootstrap.clone(), &index_addons)?;
-        tracing::info!(revision, "settings loaded");
+        tracing::info!(
+            revision,
+            state = cfg.state_index(),
+            index = %cfg.archive.index,
+            "settings loaded"
+        );
         let live = Arc::new(live::Live::from_config(&cfg)?);
-        let caps = loading.finish(&cfg)?;
-        let archive = Arc::new(Archive::new(&caps, &cfg.archive).await?);
+        let mut caps = loading.finish(&cfg)?;
+        let (archive, degraded) = open_archive(&mut caps, &cfg).await?;
+        let archive = Arc::new(archive);
         archive.set_partition_stores(partition_stores(&cfg))?;
         let jobs = Arc::new(jobs::Jobs::new(
             archive.clone(),
@@ -131,7 +174,7 @@ impl Node {
             caps.remote_nodes.clone(),
             cfg.jobs.clone(),
         ));
-        let accounts = Arc::new(auth::Accounts::open(archive.index.clone()).await?);
+        let accounts = Arc::new(auth::Accounts::open(state.clone()).await?);
         if let Some(loader) = &caps.loader {
             loader.bind_services(Arc::new(services::NodeServices {
                 archive: archive.clone(),
@@ -140,7 +183,15 @@ impl Node {
                 accounts: accounts.clone(),
             }));
         }
-        tracing::info!(?archive, "archive ready");
+        match &degraded {
+            None => tracing::info!(?archive, "archive ready"),
+            Some(d) => tracing::error!(
+                index = %d.index,
+                error = %d.error,
+                "the archive index is unavailable: the server runs degraded, with the admin UI and \
+                 API only; correct the settings and restart"
+            ),
+        }
         let dicomweb = proxy::Upstream::of(
             &cfg,
             caps.addons.iter().any(|a| a.manifest.name == "dicomweb"),
@@ -161,6 +212,7 @@ impl Node {
             }),
             restart: CancellationToken::new(),
             dicomweb,
+            degraded,
         })
     }
 
@@ -188,12 +240,14 @@ impl Node {
     /// protocol listeners are restarted if the nodes changed. The other sections wait for a
     /// restart of the server.
     ///
+    /// Secret placeholders in addon configurations keep the values in effect (ADR-0005 §7).
+    ///
     /// Fails with `Conflict` if `expected` is not the latest revision, and with
     /// `InvalidArgument` if the settings are invalid; nothing is stored then.
     pub async fn apply_settings(
         &self,
         expected: u64,
-        settings: Settings,
+        mut settings: Settings,
         author: Option<String>,
         comment: Option<String>,
     ) -> medicus_core::Result<Applied> {
@@ -206,15 +260,24 @@ impl Node {
                 state.revision
             )));
         }
+        settings
+            .restore_secrets(&state.current, &self.caps.available)
+            .map_err(invalid)?;
+        settings
+            .check_no_password_in_urls(&state.current, &self.caps.available)
+            .map_err(invalid)?;
         let cfg = settings
             .apply(self.bootstrap.clone(), &self.index_addons)
             .map_err(invalid)?;
         let live = live::LiveState::from_config(&cfg).map_err(invalid)?;
-        if settings.addons != state.current.addons {
-            addons::check_selection(&self.caps.available, &cfg).map_err(invalid)?;
+        if settings.addons != state.current.addons
+            || settings.archive.index != state.current.archive.index
+        {
+            let selection = addons::check_selection(&self.caps.available, &cfg).map_err(invalid)?;
+            addons::check_archive_index(&self.caps.available, &selection, &cfg).map_err(invalid)?;
             for (name, entry) in cfg.addons.entries.iter().filter(|(_, e)| e.enabled) {
                 if let Some(manifest) = self.caps.available.get(name) {
-                    addons::check_config(manifest, &entry.config).map_err(invalid)?;
+                    addons::check_config(manifest, &cfg, &entry.config).map_err(invalid)?;
                 }
             }
         }
@@ -236,7 +299,7 @@ impl Node {
             comment,
             created_at: time::OffsetDateTime::now_utc(),
         };
-        self.archive.index.put_settings(&revision).await?;
+        self.accounts.state().put_settings(&revision).await?;
         tracing::info!(
             revision = revision.revision,
             ?author,
@@ -289,6 +352,25 @@ impl Node {
         })
     }
 
+    /// The archive index `settings` name, if it is not the one the archive runs on and that one
+    /// holds instances: the change would orphan them (ADR-0005 §5). While degraded, whether it
+    /// holds any is unknown, and the change is allowed: it may be the way out.
+    pub(crate) async fn orphaning_index_change(
+        &self,
+        settings: &Settings,
+    ) -> medicus_core::Result<Option<String>> {
+        let index = settings
+            .archive
+            .index
+            .as_deref()
+            .unwrap_or(self.bootstrap.state_index());
+        if index == self.cfg.archive.index || self.degraded.is_some() {
+            return Ok(None);
+        }
+        let stored = self.archive.index.stored_bytes().await?;
+        Ok(stored.iter().any(|s| s.bytes > 0).then(|| index.to_owned()))
+    }
+
     /// Asks [`Self::serve`] to stop gracefully and return [`Exit::Restart`].
     pub fn request_restart(&self) {
         tracing::info!("restart requested");
@@ -302,10 +384,15 @@ impl Node {
         shutdown: impl Future<Output = ()> + Send + 'static,
     ) -> anyhow::Result<Exit> {
         let stop = CancellationToken::new();
-        let mut deliveries = events::spawn(&self.archive, self.caps.event_hooks.clone(), &stop);
-        let capacity = tokio::spawn(capacity::monitor(self.archive.clone(), stop.clone()));
-        let jobs = tokio::spawn(self.jobs.clone().run(stop.clone()));
-        let pruning = tokio::spawn(prune_credentials(self.accounts.clone(), stop.clone()));
+        let mut background = tokio::task::JoinSet::new();
+        background.spawn(prune_credentials(self.accounts.clone(), stop.clone()));
+        let mut deliveries = if self.degraded.is_none() {
+            background.spawn(capacity::monitor(self.archive.clone(), stop.clone()));
+            background.spawn(self.jobs.clone().run(stop.clone()));
+            events::spawn(&self.archive, self.caps.event_hooks.clone(), &stop)
+        } else {
+            tokio::task::JoinSet::new()
+        };
         self.start_services().await?;
 
         let state = api::AppState::new(&self);
@@ -332,9 +419,7 @@ impl Node {
         self.stop_services().await;
         stop.cancel();
         while deliveries.join_next().await.is_some() {}
-        let _ = capacity.await;
-        let _ = jobs.await;
-        let _ = pruning.await;
+        while background.join_next().await.is_some() {}
         Ok(if self.restart.is_cancelled() {
             Exit::Restart
         } else {
@@ -342,8 +427,11 @@ impl Node {
         })
     }
 
-    /// Starts the addons' background services (e.g. the DIMSE listener).
+    /// Starts the addons' background services (e.g. the DIMSE listener); none while degraded.
     pub async fn start_services(&self) -> anyhow::Result<()> {
+        if self.degraded.is_some() {
+            return Ok(());
+        }
         for (name, service) in &self.caps.services {
             service
                 .start()
@@ -356,6 +444,9 @@ impl Node {
 
     /// Stops the addons' background services, in reverse order.
     pub async fn stop_services(&self) {
+        if self.degraded.is_some() {
+            return;
+        }
         for (name, service) in self.caps.services.iter().rev() {
             match service.stop().await {
                 Ok(()) => tracing::info!(service = %name, "service stopped"),

@@ -6,7 +6,7 @@
 //! association stops reading from the socket, so TCP flow control slows the sender down.
 //!
 //! C-FIND matches are streamed as pending responses while the association keeps listening, so a
-//! C-CANCEL stops the query. C-MOVE and C-GET (see [`retrieve`]) send their instances with C-STORE
+//! C-CANCEL stops the query. C-MOVE and C-GET (see `retrieve`) send their instances with C-STORE
 //! sub-operations over a new association or the same one.
 
 mod retrieve;

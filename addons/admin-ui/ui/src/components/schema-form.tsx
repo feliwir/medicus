@@ -1,12 +1,15 @@
 // A form generated from an addon's configuration schema (the subset schemars produces for plain
 // configuration structs). Fields it cannot render are edited as JSON.
 
+import { useState } from "react";
 import { Field } from "@/components/page";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Select } from "@/components/ui/select";
 import { Textarea } from "@/components/ui/textarea";
-import type { JsonSchema } from "@/lib/api";
+import { type JsonSchema, SECRET, isSecret } from "@/lib/api";
 import { splitList } from "@/lib/settings";
 
 type Config = Record<string, unknown>;
@@ -63,6 +66,9 @@ function SchemaField({
   const { schema: s } = nonNull(schema);
   const hint = [schema.description, defaultHint(schema)].filter(Boolean).join(" ");
   const title = `${label(name)}${required ? "" : " (optional)"}`;
+  if (schema.writeOnly) {
+    return <SecretField id={id} title={title} hint={hint} kind={kind} value={value} onChange={onChange} />;
+  }
   switch (kind) {
     case "boolean":
       return (
@@ -125,6 +131,77 @@ function SchemaField({
     default:
       return <JsonField id={id} label={title} hint={hint} value={value} onChange={onChange} />;
   }
+}
+
+/** A secret: the server never returns it, so a stored one can only be kept, replaced or removed. */
+function SecretField({
+  id,
+  title,
+  hint,
+  kind,
+  value,
+  onChange,
+}: {
+  id: string;
+  title: string;
+  hint?: string;
+  kind: ReturnType<typeof fieldKind>;
+  value: unknown;
+  onChange: (v: unknown) => void;
+}) {
+  // Whether a value was stored when the form opened; replacing it can be undone.
+  const [stored] = useState(isSecret(value));
+  const [replacing, setReplacing] = useState(false);
+  if (isSecret(value) && !replacing) {
+    return (
+      <Field id={id} label={title} hint={hint}>
+        <div className="flex items-center gap-2">
+          <Badge variant="outline">Set · hidden</Badge>
+          <Button id={id} type="button" variant="outline" onClick={() => setReplacing(true)}>
+            Replace
+          </Button>
+          <Button type="button" variant="ghost" onClick={() => onChange(undefined)}>
+            Remove
+          </Button>
+        </div>
+      </Field>
+    );
+  }
+  const keep = stored && (
+    <Button
+      type="button"
+      variant="ghost"
+      onClick={() => {
+        onChange(SECRET);
+        setReplacing(false);
+      }}
+    >
+      Keep the stored one
+    </Button>
+  );
+  if (kind === "string") {
+    return (
+      <Field id={id} label={title} hint={hint}>
+        <div className="flex items-center gap-2">
+          <Input
+            id={id}
+            type="password"
+            autoComplete="new-password"
+            className="font-mono"
+            value={typeof value === "string" ? value : ""}
+            onChange={(e) => onChange(e.target.value === "" ? (stored ? SECRET : undefined) : e.target.value)}
+          />
+          {keep}
+        </div>
+      </Field>
+    );
+  }
+  return (
+    <div className="space-y-2">
+      <JsonField id={id} label={title} hint={hint} value={isSecret(value) ? undefined : value} onChange={(v) => onChange(v ?? (stored ? SECRET : undefined))} />
+      {keep}
+    </div>
+  );
 }
 
 function JsonField({

@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, useNavigate } from "@tanstack/react-router";
-import { AlertCircle, Check, Terminal } from "lucide-react";
+import { AlertCircle, Check, Database, Info, Terminal } from "lucide-react";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Alert } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
@@ -8,13 +8,21 @@ import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardFooter, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
 import { api, waitForRestart } from "@/lib/api";
-import { type SetupChoices, defaultChoices, planSettings, plannedAddons, validate } from "@/lib/setup";
+import {
+  type DatabaseChoice,
+  type SetupChoices,
+  defaultChoices,
+  planSettings,
+  plannedAddons,
+  validate,
+} from "@/lib/setup";
 import { cn } from "@/lib/utils";
 import { Centered } from "./login";
 
-const steps = ["Token", "Administrator", "Server", "Network", "First node", "Summary"] as const;
+const steps = ["Token", "Administrator", "Server", "Database", "Network", "First node", "Summary"] as const;
 
 function Progress({ step }: { step: number }) {
   return (
@@ -60,6 +68,8 @@ export function Setup() {
   const queryClient = useQueryClient();
   const status = useQuery({ queryKey: ["setup"], queryFn: api.setupStatus });
   const [step, setStep] = useState(0);
+  // Once signed in as the administrator: whether PostgreSQL can be chosen.
+  const addons = useQuery({ queryKey: ["addons"], queryFn: api.addons, enabled: step >= 2 });
   const [token, setToken] = useState("");
   const [admin, setAdmin] = useState({ name: "admin", displayName: "", password: "", repeat: "" });
   const [choices, setChoices] = useState<SetupChoices>(defaultChoices);
@@ -113,8 +123,9 @@ export function Setup() {
 
   const fieldsOfStep: Record<number, string[]> = {
     2: ["serverName"],
-    3: ["dimsePort", "dicomwebPort"],
-    4: ["nodeName", "aeTitle", "dicomwebPath"],
+    3: ["dbHost", "dbPort", "dbName", "dbUser"],
+    4: ["dimsePort", "dicomwebPort"],
+    5: ["nodeName", "aeTitle", "dicomwebPath"],
   };
   const stepValid =
     step === 0
@@ -226,6 +237,15 @@ export function Setup() {
               </>
             )}
             {step === 3 && (
+              <DatabaseStep
+                postgres={addons.data?.find((a) => a.name === "index-postgres")}
+                loading={addons.isPending}
+                value={choices.database}
+                errors={errors}
+                onChange={(database) => update({ database })}
+              />
+            )}
+            {step === 4 && (
               <div className="space-y-3">
                 {(
                   [
@@ -261,7 +281,7 @@ export function Setup() {
                 ))}
               </div>
             )}
-            {step === 4 && (
+            {step === 5 && (
               <>
                 <Field id="node-name" label="Node name" error={errors.nodeName}>
                   <Input
@@ -307,7 +327,7 @@ export function Setup() {
                 </p>
               </>
             )}
-            {step === 5 && <Summary choices={choices} />}
+            {step === 6 && <Summary choices={choices} />}
             {busy && <p className="text-sm text-muted-foreground">{busy}</p>}
             {error && (
               <Alert variant="destructive">
@@ -342,6 +362,7 @@ const titles = [
   "Welcome to medicus",
   "Create the administrator",
   "Server and storage",
+  "Database",
   "Network",
   "First node",
   "Summary",
@@ -351,15 +372,130 @@ const descriptions = [
   "Set up the archive in a few steps.",
   "The first account; it can do everything, including creating more users.",
   "Where the archive keeps its files.",
+  "Where the archive keeps its index of patients, studies and series.",
   "The protocols the archive speaks.",
   "A node is how the archive appears to its peers: an AE title and a DICOMweb path.",
   "The server applies these settings and restarts.",
 ];
 
+function DatabaseStep({
+  postgres,
+  loading,
+  value,
+  errors,
+  onChange,
+}: {
+  /** The `index-postgres` addon, if the server has it. */
+  postgres?: { bootstrap: boolean };
+  loading: boolean;
+  value: DatabaseChoice;
+  errors: Record<string, string>;
+  onChange: (v: DatabaseChoice) => void;
+}) {
+  const set = (change: Partial<DatabaseChoice>) => onChange({ ...value, ...change });
+  if (loading) return <p className="text-sm text-muted-foreground">Loading…</p>;
+  if (!postgres || postgres.bootstrap) {
+    return (
+      <Alert variant="info">
+        <Info />
+        <div>
+          {postgres
+            ? "This server's configuration file chooses its database; the archive uses it."
+            : "This server is built without PostgreSQL support: the archive uses SQLite, inside the data directory."}
+        </div>
+      </Alert>
+    );
+  }
+  const options = [
+    ["sqlite", "SQLite", "Nothing to set up: a file inside the server's data directory. Good for a single server."],
+    ["postgres", "PostgreSQL", "An existing PostgreSQL database. For large archives, or several servers sharing one."],
+  ] as const;
+  return (
+    <div className="space-y-5">
+      <div className="grid gap-3 sm:grid-cols-2" role="radiogroup" aria-label="Database">
+        {options.map(([kind, name, what]) => (
+          <button
+            key={kind}
+            type="button"
+            role="radio"
+            aria-checked={value.kind === kind}
+            onClick={() => set({ kind })}
+            className={cn(
+              "flex items-start gap-3 rounded-md border p-4 text-left hover:border-foreground/60",
+              value.kind === kind && "border-primary ring-1 ring-primary",
+            )}
+          >
+            <Database className="mt-0.5 size-[18px] shrink-0 text-muted-foreground" />
+            <span>
+              <span className="block text-base font-medium">{name}</span>
+              <span className="block text-xs text-muted-foreground">{what}</span>
+            </span>
+          </button>
+        ))}
+      </div>
+      {value.kind === "postgres" && (
+        <>
+          <div className="grid gap-4 sm:grid-cols-[1fr_8rem]">
+            <Field id="db-host" label="Server" error={errors.dbHost}>
+              <Input id="db-host" className="font-mono" placeholder="db.example.org" value={value.host} onChange={(e) => set({ host: e.target.value })} />
+            </Field>
+            <Field id="db-port" label="Port" error={errors.dbPort}>
+              <Input
+                id="db-port"
+                type="number"
+                className="font-mono"
+                value={value.port}
+                onChange={(e) => set({ port: Number(e.target.value) })}
+              />
+            </Field>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field id="db-name" label="Database" error={errors.dbName} hint="It must exist; medicus creates its tables.">
+              <Input id="db-name" className="font-mono" value={value.database} onChange={(e) => set({ database: e.target.value })} />
+            </Field>
+            <Field id="db-tls" label="TLS">
+              <Select id="db-tls" value={value.tls} onChange={(e) => set({ tls: e.target.value as DatabaseChoice["tls"] })}>
+                <option value="prefer">If the server offers it</option>
+                <option value="require">Required</option>
+                <option value="verify-full">Required, with a verified certificate</option>
+                <option value="disable">Off</option>
+              </Select>
+            </Field>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field id="db-user" label="User" error={errors.dbUser}>
+              <Input id="db-user" className="font-mono" autoComplete="off" value={value.user} onChange={(e) => set({ user: e.target.value })} />
+            </Field>
+            <Field id="db-password" label="Password" hint="Stored with the settings; never shown again.">
+              <Input
+                id="db-password"
+                type="password"
+                autoComplete="new-password"
+                value={value.password}
+                onChange={(e) => set({ password: e.target.value })}
+              />
+            </Field>
+          </div>
+          <p className="text-xs text-muted-foreground">
+            The connection is made when the server restarts at the end of the setup. If it fails, the server starts
+            without the archive and shows why; the database can then be changed under Addons.
+          </p>
+        </>
+      )}
+    </div>
+  );
+}
+
 function Summary({ choices }: { choices: SetupChoices }) {
   const rows: [string, ReactNode][] = [
     ["Server", choices.serverName],
     ["Storage", choices.storagePath || "inside the data directory"],
+    [
+      "Database",
+      choices.database.kind === "postgres"
+        ? `PostgreSQL: ${choices.database.database} on ${choices.database.host}:${choices.database.port}`
+        : "SQLite, inside the data directory",
+    ],
     [
       "Node",
       <span key="node">

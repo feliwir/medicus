@@ -2,7 +2,7 @@
 //!
 //! ```toml
 //! [addons.index-postgres]
-//! config = { url = "postgres://medicus:secret@db.example/medicus", max_connections = 16 }
+//! config = { url = "postgres://medicus@db.example/medicus", password = "secret" }
 //! ```
 //!
 //! Writers run concurrently (READ COMMITTED); the shared code serializes only the outbox insert
@@ -30,12 +30,23 @@ pub struct Config {
     /// Connection URL (`postgres://user:password@host:port/database?sslmode=...`). The database
     /// must exist; the schema is created and migrated on start.
     pub url: String,
+    /// The password, if the URL has none. Keeping it out of the URL lets the admin API hide it.
+    #[serde(default)]
+    #[schemars(extend("writeOnly" = true))]
+    pub password: Option<String>,
     /// Name under which the index is registered.
     #[serde(default = "default_name")]
     pub name: String,
     /// Size of the connection pool, shared by reads and writes.
     #[serde(default = "default_max_connections")]
     pub max_connections: u32,
+    /// How long to wait for a connection, at startup and later, before giving up.
+    #[serde(default = "default_connect_timeout_secs")]
+    pub connect_timeout_secs: u64,
+}
+
+fn default_connect_timeout_secs() -> u64 {
+    10
 }
 
 fn default_name() -> String {
@@ -74,13 +85,16 @@ pub struct PostgresBackend {
 impl PostgresBackend {
     /// Connects to `cfg.url` and migrates the schema.
     pub async fn open(cfg: &Config) -> Result<Self> {
-        let options: PgConnectOptions = cfg
+        let mut options: PgConnectOptions = cfg
             .url
             .parse()
             .map_err(|e| Error::invalid_argument(format!("postgres url: {e}")))?;
+        if let Some(password) = &cfg.password {
+            options = options.password(password);
+        }
         let pool = PgPoolOptions::new()
             .max_connections(cfg.max_connections.max(1))
-            .acquire_timeout(Duration::from_secs(10))
+            .acquire_timeout(Duration::from_secs(cfg.connect_timeout_secs.max(1)))
             .connect_with(options)
             .await
             .map_err(|e| db_error(&e))?;
@@ -242,8 +256,10 @@ mod tests {
             let (server, _) = url.split('?').next().unwrap().rsplit_once('/').unwrap();
             let cfg = Config {
                 url: format!("{server}/{name}"),
+                password: None,
                 name: "t".into(),
                 max_connections: 8,
+                connect_timeout_secs: 10,
             };
             Some(Self { admin, name, cfg })
         }
@@ -388,5 +404,27 @@ mod tests {
         let index = db.open().await;
         medicus_testkit::index::extra_tags_on_empty_index(&index).await;
         db.drop_db(index).await;
+    }
+
+    #[tokio::test]
+    async fn the_password_can_be_kept_out_of_the_url() {
+        let Some(db) = TestDb::create().await else {
+            return;
+        };
+        // postgres://user:password@host/... → postgres://user@host/... and the password.
+        let (scheme, rest) = db.cfg.url.split_once("://").unwrap();
+        let (credentials, host) = rest.split_once('@').unwrap();
+        let Some((user, password)) = credentials.split_once(':') else {
+            eprintln!("INDEX_POSTGRES_TEST_URL has no password; skipping");
+            return;
+        };
+        let mut cfg = db.cfg.clone();
+        cfg.url = format!("{scheme}://{user}@{host}");
+        cfg.password = Some("wrong".into());
+        cfg.connect_timeout_secs = 1;
+        assert!(PostgresBackend::open(&cfg).await.is_err());
+        cfg.password = Some(password.into());
+        let backend = PostgresBackend::open(&cfg).await.unwrap();
+        db.drop_db(SqlIndex::new(backend)).await;
     }
 }

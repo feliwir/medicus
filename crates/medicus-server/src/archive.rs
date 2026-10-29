@@ -97,6 +97,39 @@ impl Archive {
         })
     }
 
+    /// An archive whose index is `index`, without calling it: for degraded mode, where every
+    /// call fails. The configuration is still checked.
+    pub(crate) fn degraded(
+        caps: &Capabilities,
+        cfg: &ArchiveConfig,
+        index: Arc<dyn IndexStore>,
+    ) -> anyhow::Result<Self> {
+        if !caps.blob_stores.contains_key(&cfg.storage) {
+            bail!(
+                "blob store {:?} is not provided by any addon (available: {:?})",
+                cfg.storage,
+                caps.blob_stores.keys().collect::<Vec<_>>()
+            );
+        }
+        let extra_tags: Vec<ExtraTag> = cfg
+            .extra_tags
+            .iter()
+            .map(|t| t.resolve().map_err(anyhow::Error::msg))
+            .collect::<anyhow::Result<_>>()?;
+        Ok(Self {
+            index,
+            stores: caps.blob_stores.clone(),
+            default_store: cfg.storage.clone(),
+            partition_stores: arc_swap::ArcSwap::default(),
+            policy: cfg.duplicate_policy,
+            max_header_bytes: cfg.max_header_bytes,
+            extra_tags: extra_tags.into(),
+            last_seq: watch::Sender::new(0),
+            capacity: cfg.capacity.clone(),
+            storage_full: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
     /// Checks that the blob stores the partitions name exist.
     pub(crate) fn check_partition_stores(
         &self,

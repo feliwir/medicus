@@ -8,8 +8,9 @@
 //! Library addons described by a manifest file ([`file`]) take part in resolution without being
 //! loaded; only the libraries of the addons actually selected are opened.
 //!
-//! The index providers are loaded before everything else ([`load_index`]): the settings, which say
-//! which other addons are enabled, are stored in the index (ADR-0004 §3).
+//! The index providers the bootstrap configures are loaded before everything else ([`load_index`]):
+//! the settings, which say which other addons are enabled, are stored in the state store (ADR-0004
+//! §3, ADR-0005). An archive index other than the state store is loaded with the other addons.
 
 mod file;
 
@@ -99,6 +100,9 @@ pub(crate) struct Capabilities {
     pub(crate) available: BTreeMap<String, AddonManifest>,
     /// The loader, to bind the host services once the archive exists.
     pub(crate) loader: Option<AddonLoader>,
+    /// Why the addon of an archive index other than the state store failed to load: the server
+    /// then starts degraded (ADR-0005 §3).
+    pub(crate) index_failure: Option<anyhow::Error>,
 }
 
 impl std::fmt::Debug for Capabilities {
@@ -385,13 +389,13 @@ fn verify_sha256(path: &Path, expected: &str) -> anyhow::Result<()> {
 }
 
 /// The configuration of a default provider pulled in without being configured: the local
-/// filesystem store and the `SQLite` index below `data_dir`, under the archive's store and index
-/// names (zero-configuration start).
+/// filesystem store and the `SQLite` index below `data_dir`, under the archive's store name and the
+/// state store's name (zero-configuration start).
 fn default_config(cfg: &Config, name: &str) -> serde_json::Value {
     let data = &cfg.server.data_dir;
     match name {
         "storage-fs" => json!({ "root": data.join("blobs"), "name": cfg.archive.storage }),
-        "index-sqlite" => json!({ "path": data.join("index.sqlite"), "name": cfg.archive.index }),
+        "index-sqlite" => json!({ "path": data.join("index.sqlite"), "name": cfg.state_index() }),
         _ => serde_json::Value::Null,
     }
 }
@@ -529,8 +533,9 @@ pub(crate) struct Loading {
     caps: Capabilities,
 }
 
-/// Resolves and loads the addons that provide index stores (and nothing else), so that the
-/// settings can be read before the other addons are resolved with [`Loading::finish`].
+/// Resolves and loads the index providers the bootstrap configures (or the default one), so that
+/// the settings can be read from the state store before the other addons are resolved with
+/// [`Loading::finish`].
 pub(crate) fn load_index(cfg: &Config, rt: &Handle) -> anyhow::Result<Loading> {
     let loader = AddonLoader::new(rt.clone());
     let candidates = candidates(&loader, cfg)?;
@@ -541,34 +546,128 @@ pub(crate) fn load_index(cfg: &Config, rt: &Handle) -> anyhow::Result<Loading> {
         .collect();
     let mut configured = configured(cfg);
     configured.retain(|name, _| providers.contains_key(name));
-    let order = resolve(
-        &providers,
-        &configured,
-        &DEFAULT_PROVIDERS,
-        &[Capability::IndexStore],
-    )?;
+    let order = match &cfg.state.index {
+        // Every index provider the bootstrap enables, as before ADR-0005.
+        None => resolve(
+            &providers,
+            &configured,
+            &DEFAULT_PROVIDERS,
+            &[Capability::IndexStore],
+        )?,
+        // Only the state store's: other index providers are settings.
+        Some(state) => {
+            let provider = state_provider(cfg, &providers, state)?;
+            configured.retain(|name, _| *name == provider);
+            resolve(
+                &providers,
+                &configured,
+                &[(Capability::IndexStore, provider.as_str())],
+                &[Capability::IndexStore],
+            )?
+        }
+    };
     let mut loading = Loading {
         loader,
         candidates,
         caps: Capabilities::default(),
     };
-    loading.init(cfg, order)?;
+    loading.init(cfg, order, false)?;
     Ok(loading)
 }
 
+/// Whether `addon` registers the index store `name` under `cfg`: it is not disabled, and its
+/// `name` (as configured, or else the default in its configuration schema) is `name`.
+fn registers_index(cfg: &Config, addon: &str, manifest: &AddonManifest, name: &str) -> bool {
+    let configured = cfg.addons.entries.get(addon);
+    if configured.is_some_and(|e| !e.enabled)
+        || !manifest.provides_capability(Capability::IndexStore)
+    {
+        return false;
+    }
+    let default = manifest
+        .config_schema
+        .as_ref()
+        .and_then(|s| s.pointer("/properties/name/default"));
+    configured
+        .and_then(|e| e.config.get("name"))
+        .filter(|n| !n.is_null())
+        .or(default)
+        .and_then(serde_json::Value::as_str)
+        == Some(name)
+}
+
+/// The index provider that registers the state store `name` ([`registers_index`]). Without one,
+/// the default provider if the bootstrap does not configure it: it is then registered under the
+/// state store's name ([`default_config`]).
+fn state_provider(
+    cfg: &Config,
+    providers: &BTreeMap<String, AddonManifest>,
+    name: &str,
+) -> anyhow::Result<String> {
+    let matching: Vec<&String> = providers
+        .iter()
+        .filter(|(addon, manifest)| registers_index(cfg, addon, manifest, name))
+        .map(|(addon, _)| addon)
+        .collect();
+    match matching.as_slice() {
+        [one] => Ok((*one).clone()),
+        [] => {
+            let default = DEFAULT_PROVIDERS
+                .iter()
+                .find(|(c, _)| *c == Capability::IndexStore)
+                .map(|(_, p)| *p)
+                .filter(|p| providers.contains_key(*p) && !cfg.addons.entries.contains_key(*p));
+            default.map(str::to_owned).with_context(|| {
+                format!(
+                    "no index addon registers the state store {name:?} (`state.index`); set the \
+                     `name` in the configuration of the addon that should provide it"
+                )
+            })
+        }
+        several => bail!(
+            "several index addons register the state store {name:?} (`state.index`): \
+             {several:?}; set a different `name` in their configuration"
+        ),
+    }
+}
+
+/// Checks that an addon `selection` loads registers the archive index `cfg.archive.index`, unless
+/// it is the state store, which the bootstrap provides.
+pub(crate) fn check_archive_index(
+    available: &BTreeMap<String, AddonManifest>,
+    selection: &[(String, LoadedBy)],
+    cfg: &Config,
+) -> anyhow::Result<()> {
+    let name = cfg.archive.index.as_str();
+    if name == cfg.state_index()
+        || selection
+            .iter()
+            .filter_map(|(addon, _)| Some((addon, available.get(addon)?)))
+            .any(|(addon, manifest)| registers_index(cfg, addon, manifest, name))
+    {
+        return Ok(());
+    }
+    bail!(
+        "no enabled addon registers the index {name:?} (`archive.index`); enable the addon that \
+         provides it, e.g. `index-postgres`, and set its `name` if it differs"
+    )
+}
+
 impl Loading {
-    /// The index store registered as `name`.
-    pub(crate) fn index_store(&self, name: &str) -> anyhow::Result<Arc<dyn IndexStore>> {
+    /// The state store: the index store registered as `cfg.state_index()`.
+    pub(crate) fn state_store(&self, cfg: &Config) -> anyhow::Result<Arc<dyn IndexStore>> {
+        let name = cfg.state_index();
         self.caps.index_stores.get(name).cloned().with_context(|| {
             format!(
-                "no index store is registered as {name:?} (`archive.index`); registered: {:?}",
+                "no index store is registered as {name:?} (the state store: `state.index`, or \
+                 else `archive.index`); registered: {:?}",
                 self.caps.index_stores.keys().collect::<Vec<_>>()
             )
         })
     }
 
-    /// The names of the addons loaded so far: the index providers. Their configuration is part of
-    /// the bootstrap, not of the settings.
+    /// The names of the addons loaded so far: the index providers of the bootstrap. Their
+    /// configuration is part of the bootstrap, not of the settings.
     pub(crate) fn loaded(&self) -> BTreeSet<String> {
         self.caps
             .addons
@@ -577,18 +676,22 @@ impl Loading {
             .collect()
     }
 
-    /// Resolves the addons again, now with the settings applied to `cfg`, and loads the ones not
-    /// loaded yet.
-    pub(crate) fn finish(mut self, cfg: &Config) -> anyhow::Result<Capabilities> {
-        let loaded = self.loaded();
-        let available: BTreeMap<String, AddonManifest> = self
-            .caps
+    /// The manifests of every addon that could be loaded, loaded or not.
+    pub(crate) fn manifests(&self) -> BTreeMap<String, AddonManifest> {
+        self.caps
             .addons
             .iter()
             .map(|a| &a.manifest)
             .chain(self.candidates.values().map(|c| &c.manifest))
             .map(|m| (m.name.clone(), m.clone()))
-            .collect();
+            .collect()
+    }
+
+    /// Resolves the addons again, now with the settings applied to `cfg`, and loads the ones not
+    /// loaded yet.
+    pub(crate) fn finish(mut self, cfg: &Config) -> anyhow::Result<Capabilities> {
+        let loaded = self.loaded();
+        let available = self.manifests();
         let order = resolve(
             &available,
             &configured(cfg),
@@ -599,14 +702,23 @@ impl Loading {
         .filter(|(name, _)| !loaded.contains(name))
         .collect();
         self.caps.available = available;
-        self.init(cfg, order)?;
+        self.init(cfg, order, true)?;
         tracing::info!(caps = ?self.caps, "addons loaded");
         self.caps.loader = Some(self.loader);
         Ok(self.caps)
     }
 
-    /// Initializes the addons in `order`.
-    fn init(&mut self, cfg: &Config, order: Vec<(String, LoadedBy)>) -> anyhow::Result<()> {
+    /// Initializes the addons in `order`. With `tolerate_index`, the failure of the addon that
+    /// registers the archive index, if that is not the state store, is recorded in
+    /// [`Capabilities::index_failure`] instead of failing.
+    fn init(
+        &mut self,
+        cfg: &Config,
+        order: Vec<(String, LoadedBy)>,
+        tolerate_index: bool,
+    ) -> anyhow::Result<()> {
+        let archive_index = (tolerate_index && cfg.archive.index != cfg.state_index())
+            .then_some(cfg.archive.index.as_str());
         for (name, loaded_by) in order {
             let config = match cfg.addons.entries.get(&name) {
                 Some(entry) => entry.config.clone(),
@@ -617,9 +729,19 @@ impl Loading {
                 .candidates
                 .remove(&name)
                 .with_context(|| format!("addon {name:?} disappeared during loading"))?;
-            let addon = prepare(&self.loader, candidate)
+            let provides_index = archive_index
+                .is_some_and(|index| registers_index(cfg, &name, &candidate.manifest, index));
+            let addon = match prepare(&self.loader, candidate)
                 .and_then(|prepared| Ok(self.loader.init(&prepared, &config)?))
-                .with_context(|| format!("loading addon {name:?}"))?;
+                .with_context(|| format!("loading addon {name:?}"))
+            {
+                Ok(addon) => addon,
+                Err(e) if provides_index => {
+                    self.caps.index_failure = Some(e);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            };
             self.caps.add(addon, loaded_by)?;
         }
         Ok(())
@@ -679,15 +801,26 @@ pub(crate) fn dependants(
     out
 }
 
-/// Checks an addon's configuration against the JSON Schema in its manifest, if it has one.
-/// `null` stands for "not configured" and is not checked: the addon then uses its defaults or a
-/// configuration the core derives.
+/// Checks an addon's configuration in `cfg` against the JSON Schema in its manifest, if it has
+/// one. Not configured (`null`), it is checked as the configuration the core derives for it
+/// ([`default_config`]), or else as `{}`: an addon with required fields must be configured.
 pub(crate) fn check_config(
     manifest: &AddonManifest,
+    cfg: &Config,
     config: &serde_json::Value,
 ) -> anyhow::Result<()> {
-    let (Some(schema), false) = (&manifest.config_schema, config.is_null()) else {
+    let Some(schema) = &manifest.config_schema else {
         return Ok(());
+    };
+    let derived;
+    let config = if config.is_null() {
+        derived = match default_config(cfg, &manifest.name) {
+            serde_json::Value::Null => json!({}),
+            d => d,
+        };
+        &derived
+    } else {
+        config
     };
     let validator = jsonschema::validator_for(schema).map_err(|e| {
         anyhow::anyhow!(

@@ -51,9 +51,12 @@ pub struct HookConfig {
     pub partitions: Vec<Partition>,
     /// Shared secret for the `X-Medicus-Signature` header.
     #[serde(default)]
+    #[schemars(extend("writeOnly" = true))]
     pub secret: Option<String>,
-    /// Extra request headers (e.g. `Authorization`).
+    /// Extra request headers (e.g. `Authorization`). Secret as a whole: they often carry
+    /// credentials.
     #[serde(default)]
+    #[schemars(extend("writeOnly" = true))]
     pub headers: BTreeMap<String, String>,
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,

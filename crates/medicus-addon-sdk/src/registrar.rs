@@ -53,7 +53,8 @@ impl Registrar {
     }
 
     /// The addon's configuration (`[addons.<name>.config]`), deserialized into `T`. A missing
-    /// configuration deserializes from JSON `null`.
+    /// configuration deserializes from JSON `null` (so `Option<_>` is `None`), or else from `{}`
+    /// (so a struct takes its defaults).
     pub fn config<T: DeserializeOwned>(&self) -> Result<T, Error> {
         let api = self.host.api();
         // SAFETY: valid host API; the returned buffer is owned by us.
@@ -63,7 +64,7 @@ impl Registrar {
         } else {
             buf.as_slice()
         };
-        serde_json::from_slice(bytes)
+        parse_config(bytes)
             .map_err(|e| Error::invalid_argument(format!("invalid configuration: {e}")))
     }
 
@@ -252,4 +253,51 @@ pub unsafe fn init<E: fmt::Display>(
 /// The host checks compatibility too; this guards against hosts that skip the check.
 fn compatible_host(host_version: u32) -> bool {
     medicus_abi::bridge::abi_compatible(MD_ABI_VERSION, host_version)
+}
+
+/// Deserializes a configuration; `null` (not configured) falls back to `{}` if `T` does not
+/// accept it.
+fn parse_config<T: DeserializeOwned>(bytes: &[u8]) -> serde_json::Result<T> {
+    match serde_json::from_slice(bytes) {
+        Err(_) if bytes == b"null" => serde_json::from_slice(b"{}"),
+        result => result,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde::Deserialize;
+
+    use super::parse_config;
+
+    #[derive(Debug, PartialEq, Deserialize)]
+    struct Defaults {
+        #[serde(default)]
+        port: u16,
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct Required {
+        #[allow(dead_code)]
+        root: String,
+    }
+
+    #[test]
+    fn null_config_takes_struct_defaults() {
+        assert_eq!(
+            parse_config::<Defaults>(b"null").unwrap(),
+            Defaults { port: 0 }
+        );
+    }
+
+    #[test]
+    fn null_config_is_none() {
+        assert_eq!(parse_config::<Option<Defaults>>(b"null").unwrap(), None);
+    }
+
+    #[test]
+    fn null_config_reports_missing_fields() {
+        let e = parse_config::<Required>(b"null").unwrap_err();
+        assert!(e.to_string().contains("missing field `root`"), "{e}");
+    }
 }

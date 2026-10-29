@@ -129,11 +129,11 @@ async fn event_hooks() {
 async fn init_failure_and_bad_config() {
     assert!(matches!(
         load_static(&json!({ "fail_init": true })),
-        Err(LoadError::InitFailed(_))
+        Err(LoadError::InitFailed { .. })
     ));
     assert!(matches!(
         load_static(&json!({ "unknown": 1 })),
-        Err(LoadError::InitFailed(_))
+        Err(LoadError::InitFailed { .. })
     ));
 }
 
@@ -214,7 +214,7 @@ async fn undeclared_capabilities_are_refused() {
     static ENTRY: StaticAddon =
         medicus_addon_sdk::static_addon!(manifest = manifest(), init = test_addon::init);
     let err = AddonLoader::new(Handle::current()).load_static(&ENTRY, "test-addon", &json!(null));
-    assert!(matches!(err, Err(LoadError::InitFailed(_))), "{err:?}");
+    assert!(matches!(err, Err(LoadError::InitFailed { .. })), "{err:?}");
 }
 
 /// Builds the test addon as a shared library and returns its path.

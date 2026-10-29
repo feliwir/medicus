@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, Navigate, Outlet, useNavigate } from "@tanstack/react-router";
 import {
   Activity,
+  AlertCircle,
   Boxes,
   Database,
   FolderSearch,
@@ -145,6 +146,25 @@ function RestartBanner({ sections }: { sections: string[] }) {
   );
 }
 
+/** The archive index cannot be opened: the server runs with the admin UI and API only. */
+function DegradedBanner({ degraded }: { degraded: { index: string; error: string } }) {
+  return (
+    <Alert variant="destructive" className="items-center rounded-none border-x-0 border-t-0 px-6">
+      <AlertCircle />
+      <div className="flex-1">
+        <div className="font-medium">
+          The archive database (<span className="font-mono">{degraded.index}</span>) is unavailable: the archive is
+          offline.
+        </div>
+        <div className="text-xs break-words">{degraded.error}</div>
+      </div>
+      <Button variant="outline" asChild>
+        <Link to="/config/addons">Change the database</Link>
+      </Button>
+    </Alert>
+  );
+}
+
 /** The signed-in application: sidebar, top bar and the current screen. */
 export function AppShell() {
   const navigate = useNavigate();
@@ -211,6 +231,7 @@ export function AppShell() {
             </DropdownMenuContent>
           </DropdownMenu>
         </header>
+        {system.data?.degraded && <DegradedBanner degraded={system.data.degraded} />}
         {restartRequired.length > 0 && <RestartBanner sections={restartRequired} />}
         <main className={cn("min-h-0 flex-1 overflow-y-auto")}>
           <Outlet />

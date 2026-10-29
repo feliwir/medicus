@@ -34,7 +34,9 @@ async fn invalid_config_fails_cleanly() {
         .load_static(&index_sqlite::ADDON, "index-sqlite", &json!({ "pth": "x" }))
         .unwrap_err();
     assert!(
-        matches!(err, medicus_host::LoadError::InitFailed(_)),
+        matches!(err, medicus_host::LoadError::InitFailed { .. }),
         "{err}"
     );
+    // The addon's reason reaches the host.
+    assert!(err.to_string().contains("pth"), "{err}");
 }

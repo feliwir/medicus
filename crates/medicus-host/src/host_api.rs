@@ -43,6 +43,8 @@ pub(crate) struct HostCtx {
     pub registrations: Mutex<Vec<RawRegistration>>,
     /// Set after `medicus_addon_init` returned; later registrations are refused.
     pub sealed: AtomicBool,
+    /// The last error the addon logged before it was sealed: why its initialization failed.
+    pub init_error: Mutex<Option<String>>,
     pub services: ServicesSlot,
     /// Runtime on which host service calls run.
     pub rt: Handle,
@@ -63,6 +65,7 @@ pub(crate) fn new_host_api(
         provides,
         registrations: Mutex::new(Vec::new()),
         sealed: AtomicBool::new(false),
+        init_error: Mutex::new(None),
         services,
         rt,
     }));
@@ -96,6 +99,12 @@ unsafe extern "C" fn host_log(ctx: *mut c_void, level: u32, target: MdStr, messa
     match level {
         MD_LOG_ERROR => {
             tracing::error!(target: "medicus::addon", addon, source = %target, "{message}");
+            if !ctx.sealed.load(Ordering::Acquire) {
+                *ctx.init_error
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    Some(message.into_owned());
+            }
         }
         MD_LOG_WARN => {
             tracing::warn!(target: "medicus::addon", addon, source = %target, "{message}");

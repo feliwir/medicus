@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Settings } from "./api";
-import { defaultChoices, planSettings, plannedAddons, validate } from "./setup";
+import { defaultChoices, planSettings, plannedAddons, postgresUrl, validate } from "./setup";
 
 const current: Settings = {
   server: { name: "medicus" },
@@ -30,6 +30,32 @@ describe("setup", () => {
     expect(next.nodes.ARCHIVE).toEqual({ partition: "default", dicomweb: { path: "archive" } });
     expect(next.addons["storage-fs"]).toBeUndefined();
     expect(plannedAddons(c).map((a) => a.name)).toEqual(["admin-ui", "index-sqlite", "storage-fs", "dicomweb"]);
+  });
+
+  it("keeps the archive with the settings by default", () => {
+    const next = planSettings({ ...current, archive: { index: "postgres" } }, defaultChoices);
+    expect(next.archive).toEqual({});
+    expect(next.addons["index-postgres"]).toBeUndefined();
+  });
+
+  it("puts the archive into PostgreSQL, with the password as a secret", () => {
+    const database = {
+      ...defaultChoices.database,
+      kind: "postgres" as const,
+      host: "db.example",
+      user: "pacs user",
+      password: "pw:@/",
+      tls: "require" as const,
+    };
+    const next = planSettings(current, { ...defaultChoices, database });
+    expect(next.archive).toEqual({ index: "postgres" });
+    expect(next.addons["index-postgres"]).toEqual({
+      enabled: true,
+      config: { url: "postgres://pacs%20user@db.example:5432/medicus?sslmode=require", name: "postgres", password: "pw:@/" },
+    });
+    expect(postgresUrl({ ...database, host: "::1" })).toBe("postgres://pacs%20user@[::1]:5432/medicus?sslmode=require");
+    expect(plannedAddons({ ...defaultChoices, database }).map((a) => a.name)).toContain("index-postgres");
+    expect(Object.keys(validate({ ...defaultChoices, database: { ...database, host: " " } }))).toEqual(["dbHost"]);
   });
 
   it("validates", () => {

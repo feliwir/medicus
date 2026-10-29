@@ -84,6 +84,17 @@ async fn apply(
     settings: Settings,
     comment: Option<String>,
 ) -> ApiResult<Response> {
+    if let Some(index) = s.node.orphaning_index_change(&settings).await? {
+        return Err(ApiError::status(
+            StatusCode::CONFLICT,
+            "archive_not_empty",
+            &format!(
+                "the archive holds instances in index {:?}: switching to index {index:?} would \
+                 orphan them; move the archive with a migration tool instead",
+                s.node.cfg.archive.index
+            ),
+        ));
+    }
     match s
         .node
         .apply_settings(expected, settings, Some(auth.user.name.clone()), comment)
@@ -113,7 +124,7 @@ async fn get_settings(State(s): State<AppState>, auth: Auth) -> ApiResult<Respon
     let (revision, settings, restart_required) = s.node.settings_status().await;
     let body = json!({
         "revision": revision,
-        "settings": settings,
+        "settings": settings.masked(&s.node.caps.available),
         "restart_required": restart_required,
     });
     Ok(([(header::ETAG, etag(revision))], Json(body)).into_response())
@@ -169,8 +180,8 @@ async fn history(
 ) -> ApiResult<Json<Vec<RevisionSummary>>> {
     auth.require(&s, Permission::AdminSystem)?;
     let revisions = s
-        .archive
-        .index
+        .accounts
+        .state()
         .settings_history(page.limit.min(500), page.offset)
         .await?;
     Ok(Json(
@@ -190,8 +201,8 @@ async fn stored_revision(
     s: &AppState,
     revision: u64,
 ) -> ApiResult<medicus_core::capability::SettingsRevision> {
-    s.archive
-        .index
+    s.accounts
+        .state()
         .settings_revision(revision)
         .await?
         .ok_or_else(|| Error::not_found(format!("there is no settings revision {revision}")).into())
@@ -204,7 +215,13 @@ async fn get_revision(
     Path(revision): Path<u64>,
 ) -> ApiResult<Json<Value>> {
     auth.require(&s, Permission::AdminSystem)?;
-    let r = stored_revision(&s, revision).await?;
+    let mut r = stored_revision(&s, revision).await?;
+    if let Ok(settings) = serde_json::from_value::<Settings>(r.document.clone()) {
+        r.document = document(&settings.masked(&s.node.caps.available))?;
+    } else if let Some(addons) = r.document.get_mut("addons") {
+        // Unreadable as settings (e.g. from an older version): hide every configuration.
+        *addons = json!({ "$secret": true });
+    }
     Ok(Json(json!({
         "revision": r.revision,
         "author": r.author,
@@ -370,10 +387,14 @@ async fn list_addons(State(s): State<AppState>, auth: Auth) -> ApiResult<Json<Ve
             .map(|manifest| {
                 let name = manifest.name.as_str();
                 let entry = settings.addons.get(name);
+                let mut config = entry.map(|e| e.config.clone()).unwrap_or_default();
+                if let Some(schema) = &manifest.config_schema {
+                    crate::secrets::mask(schema, &mut config);
+                }
                 AddonView {
                     loaded_by: loaded.get(name).map(|l| (*l).clone()),
                     enabled: entry.map(|e| e.enabled),
-                    config: entry.map(|e| e.config.clone()).unwrap_or_default(),
+                    config,
                     bootstrap: node.index_addons.contains(name),
                     selected: selection.iter().any(|(n, _)| n == name),
                     required_by: dependants.get(name).cloned().unwrap_or_default(),

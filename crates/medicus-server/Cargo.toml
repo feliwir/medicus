@@ -13,7 +13,7 @@ name = "medicus"
 path = "src/main.rs"
 
 [features]
-default = ["builtin-admin-ui", "builtin-storage-fs", "builtin-index-sqlite", "builtin-dimse", "builtin-dicomweb", "builtin-events-webhook"]
+default = ["builtin-admin-ui", "builtin-storage-fs", "builtin-index-sqlite", "builtin-index-postgres", "builtin-dimse", "builtin-dicomweb", "builtin-events-webhook"]
 builtin-admin-ui = ["dep:admin-ui"]
 builtin-storage-fs = ["dep:storage-fs"]
 builtin-index-sqlite = ["dep:index-sqlite"]
