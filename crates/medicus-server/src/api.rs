@@ -70,28 +70,47 @@ pub(crate) fn router(state: AppState) -> Router {
         .route("/jobs/{id}", get(get_job))
         .route("/jobs/{id}/cancel", post(cancel_job))
         .merge(crate::admin::routes());
-    Router::new()
+    // The `DICOMweb` proxy, at the addon's service roots (the defaults without the addon).
+    let roots = state.node.dicomweb_roots();
+    let mut router = Router::new()
         .route("/health/live", get(|| async { "ok" }))
         .route("/health/ready", get(ready))
-        .nest("/api/v1", v1)
-        .route("/rs", any(crate::proxy::forward))
-        .route("/rs/{*rest}", any(crate::proxy::forward))
-        .route("/nodes/{node}/rs", any(crate::proxy::forward))
-        .route("/nodes/{node}/rs/{*rest}", any(crate::proxy::forward))
-        .fallback(crate::routes::handle)
-        .with_state(state)
+        .nest("/api/v1", v1);
+    for prefix in roots.prefixes() {
+        router = router
+            .route(&prefix, any(crate::proxy::forward))
+            .route(&format!("{prefix}/{{*rest}}"), any(crate::proxy::forward));
+    }
+    router.fallback(crate::routes::handle).with_state(state)
 }
 
 // ------------------------------------------------------------------------------------------------
 // Peers and jobs
 
-async fn list_nodes(State(s): State<AppState>, _auth: Auth) -> Json<Vec<NodeInfo>> {
+/// A node as `GET /api/v1/nodes` shows it.
+#[derive(Debug, Serialize)]
+struct NodeView {
+    #[serde(flatten)]
+    info: NodeInfo,
+    /// The node's `DICOMweb` service root on this server, e.g. `/nodes/radiology/rs`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    dicomweb_url: Option<String>,
+}
+
+async fn list_nodes(State(s): State<AppState>, _auth: Auth) -> Json<Vec<NodeView>> {
+    let roots = s.node.dicomweb_roots();
     Json(
         s.live
             .load()
             .directory
             .nodes()
-            .map(crate::access::Node::info)
+            .map(|n| {
+                let info = n.info();
+                NodeView {
+                    dicomweb_url: info.dicomweb_path.as_deref().map(|p| roots.of_node(p)),
+                    info,
+                }
+            })
             .collect(),
     )
 }
@@ -464,6 +483,8 @@ async fn system(State(s): State<AppState>, auth: Auth) -> ApiResult<Json<serde_j
         "version": env!("CARGO_PKG_VERSION"),
         "abi_version": medicus_abi_version(),
         "storage": s.archive.default_store,
+        // The `DICOMweb` service roots, if the addon is loaded.
+        "dicomweb": s.node.dicomweb.as_ref().map(|u| &u.roots),
         "addons": s.addons,
     })))
 }

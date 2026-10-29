@@ -35,6 +35,7 @@ pub(crate) struct Node {
     pub(crate) name: String,
     pub(crate) backend: Backend,
     pub(crate) ae_title: Option<AeTitle>,
+    pub(crate) dimse_port: Option<u16>,
     pub(crate) dicomweb_path: Option<String>,
 }
 
@@ -43,6 +44,7 @@ impl Node {
         NodeInfo {
             name: self.name.clone(),
             ae_title: self.ae_title.clone(),
+            dimse_port: self.dimse_port,
             dicomweb_path: self.dicomweb_path.clone(),
             remote: matches!(self.backend, Backend::Remote(_)),
         }
@@ -333,6 +335,7 @@ fn nodes_from_config(cfg: &Config) -> anyhow::Result<BTreeMap<String, Node>> {
                 peer: None,
                 dimse: Some(crate::config::NodeDimseConfig {
                     ae_title: AeTitle::parse(DEFAULT_NODE)?,
+                    port: None,
                 }),
                 dicomweb: Some(crate::config::NodeDicomwebConfig {
                     path: DEFAULT_NODE.to_lowercase(),
@@ -359,11 +362,19 @@ fn nodes_from_config(cfg: &Config) -> anyhow::Result<BTreeMap<String, Node>> {
             }
             _ => bail!("node {name:?} needs exactly one of `partition` and `peer`"),
         };
-        let ae_title = node.dimse.map(|d| d.ae_title);
+        let (ae_title, dimse_port) = node.dimse.map(|d| (d.ae_title, d.port)).unzip();
+        let dimse_port = dimse_port.flatten();
         if let Some(ae) = &ae_title
             && !ae_titles.insert(ae.clone())
         {
             bail!("AE title {ae} is used by two nodes");
+        }
+        match dimse_port {
+            Some(0) => bail!("node {name:?}: DIMSE port 0 is not a port"),
+            Some(port) if port == cfg.http.listen.port() => {
+                bail!("node {name:?}: DIMSE port {port} is the HTTP API's port")
+            }
+            _ => {}
         }
         let dicomweb_path = node.dicomweb.map(|d| d.path);
         if let Some(path) = &dicomweb_path {
@@ -381,6 +392,7 @@ fn nodes_from_config(cfg: &Config) -> anyhow::Result<BTreeMap<String, Node>> {
                 name,
                 backend,
                 ae_title,
+                dimse_port,
                 dicomweb_path,
             },
         );
@@ -536,6 +548,10 @@ mod tests {
             "[nodes.X]\npeer = \"nope\"",
             "[nodes.X]\n",
             "[nodes.A]\npartition = \"default\"\ndimse = { ae_title = \"SAME\" }\n[nodes.B]\npartition = \"default\"\ndimse = { ae_title = \"SAME\" }",
+            // The same AE title stays one node, whatever the port.
+            "[nodes.A]\npartition = \"default\"\ndimse = { ae_title = \"SAME\", port = 11113 }\n[nodes.B]\npartition = \"default\"\ndimse = { ae_title = \"SAME\", port = 11114 }",
+            "[nodes.A]\npartition = \"default\"\ndimse = { ae_title = \"A\", port = 0 }",
+            "[nodes.A]\npartition = \"default\"\ndimse = { ae_title = \"A\", port = 8042 }",
             "[roles.r]\ngrants = [{ nodes = [\"NOPE\"], permissions = [\"query\"] }]",
             "[principals.p]\nroles = [\"missing\"]",
             // Admin permissions only on all nodes; the admin role is built in.

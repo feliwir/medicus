@@ -878,6 +878,7 @@ async fn nodes_added_at_runtime_are_served() {
             peer: None,
             dimse: Some(crate::config::NodeDimseConfig {
                 ae_title: "MEDICUS".parse().unwrap(),
+                port: None,
             }),
             dicomweb: None,
         },
@@ -889,6 +890,7 @@ async fn nodes_added_at_runtime_are_served() {
             peer: None,
             dimse: Some(crate::config::NodeDimseConfig {
                 ae_title: "ADDED".parse().unwrap(),
+                port: None,
             }),
             dicomweb: None,
         },
@@ -902,5 +904,48 @@ async fn nodes_added_at_runtime_are_served() {
         let (ok, log) = tool_log(&bin, "echoscu", echo(called)).await;
         assert!(ok, "{called}: {log}");
     }
+    node.stop_services().await;
+}
+
+/// A node with its own port is served there, and only there; the others on the addon's port. No
+/// DCMTK needed: the node echoes itself through peers.
+#[tokio::test(flavor = "multi_thread")]
+async fn nodes_listen_on_their_own_ports() {
+    let dir = tempfile::tempdir().unwrap();
+    let (main, own) = (free_port(), free_port());
+    let peer = |ae: &str, port: u16| {
+        format!("protocol = \"dimse\"\nae_title = \"{ae}\"\nhost = \"127.0.0.1\"\nport = {port}\n")
+    };
+    let toml = format!(
+        "[nodes.MAIN]\npartition = \"default\"\ndimse = {{ ae_title = \"MAIN\" }}\n\
+         [nodes.RAD]\npartition = \"default\"\ndimse = {{ ae_title = \"RAD\", port = {own} }}\n\
+         [peers.main]\n{}[peers.rad]\n{}[peers.rad_on_main]\n{}[peers.main_on_rad]\n{}",
+        peer("MAIN", main),
+        peer("RAD", own),
+        peer("RAD", main),
+        peer("MAIN", own),
+    );
+    let node = node_with_dimse(&dir.path().join("data"), main, &toml).await;
+    for ok in ["main", "rad"] {
+        node.jobs
+            .echo(ok)
+            .await
+            .unwrap_or_else(|e| panic!("{ok}: {e}"));
+    }
+    for wrong in ["rad_on_main", "main_on_rad"] {
+        assert!(
+            node.jobs.echo(wrong).await.is_err(),
+            "{wrong} must be refused"
+        );
+    }
+    let nodes = node
+        .live
+        .load()
+        .directory
+        .nodes()
+        .map(crate::access::Node::info)
+        .collect::<Vec<_>>();
+    let rad = nodes.iter().find(|n| n.name == "RAD").unwrap();
+    assert_eq!(rad.dimse_port, Some(own));
     node.stop_services().await;
 }

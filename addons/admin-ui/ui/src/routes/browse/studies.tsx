@@ -66,8 +66,8 @@ export function Studies() {
   const [offset, setOffset] = useState(0);
   const studies = useQuery({
     queryKey: ["studies", node?.dicomweb_path, filters, offset],
-    queryFn: () => dicomweb<DicomJson[]>(`/nodes/${node?.dicomweb_path}/rs/studies?${studyQuery(filters, offset)}`),
-    enabled: Boolean(node),
+    queryFn: () => dicomweb<DicomJson[]>(`${node?.dicomweb_url}/studies?${studyQuery(filters, offset)}`),
+    enabled: Boolean(node?.dicomweb_url),
   });
   const rows = (studies.data ?? []).slice(0, PAGE);
   const more = (studies.data?.length ?? 0) > PAGE;

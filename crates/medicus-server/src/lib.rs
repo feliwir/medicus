@@ -196,6 +196,21 @@ impl Node {
             &cfg,
             caps.addons.iter().any(|a| a.manifest.name == "dicomweb"),
         );
+        if let Some(upstream) = &dicomweb {
+            for prefix in upstream.roots.prefixes() {
+                let shadowed =
+                    caps.http_routes.0.keys().filter(|route| {
+                        *route == &prefix || route.starts_with(&format!("{prefix}/"))
+                    });
+                for route in shadowed {
+                    tracing::warn!(
+                        %route,
+                        %prefix,
+                        "addon HTTP routes are unreachable: the DICOMweb proxy serves this path"
+                    );
+                }
+            }
+        }
         Ok(Self {
             archive,
             live,
@@ -369,6 +384,14 @@ impl Node {
         }
         let stored = self.archive.index.stored_bytes().await?;
         Ok(stored.iter().any(|s| s.bytes > 0).then(|| index.to_owned()))
+    }
+
+    /// The `dicomweb` addon's service roots; the defaults without the addon.
+    pub(crate) fn dicomweb_roots(&self) -> proxy::Roots {
+        self.dicomweb
+            .as_ref()
+            .map(|u| u.roots.clone())
+            .unwrap_or_default()
     }
 
     /// Asks [`Self::serve`] to stop gracefully and return [`Exit::Restart`].

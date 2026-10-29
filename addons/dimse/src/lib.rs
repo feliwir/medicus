@@ -6,8 +6,10 @@
 //! config = { listen = "0.0.0.0:11112" }
 //! ```
 //!
-//! One listener serves every node with a DIMSE AE title (ADR-0003): the called AE title selects
-//! the node, and each call to the host carries the node and the caller (calling AE title and
+//! The listener serves every node with a DIMSE AE title (ADR-0003): the called AE title selects
+//! the node. A node may name its own port (`dimse = { ae_title = "RAD", port = 11113 }`): the addon
+//! then also listens there, on the address of `listen`, and serves that AE title only on that port.
+//! Each call to the host carries the node and the caller (calling AE title and
 //! address), so the core decides what the caller may do and in which partition. Received
 //! instances go through the host's ingest, exactly like uploads over `DICOMweb`, so events and
 //! deduplication are the same whatever the protocol.
@@ -20,7 +22,7 @@ mod retrieve;
 pub use find::FIND_SOP_CLASSES;
 pub use retrieve::RETRIEVE_SOP_CLASSES;
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -44,7 +46,8 @@ use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
-    /// Address and port to listen on.
+    /// Address and port to listen on. Nodes that name a port of their own are served on that
+    /// port of the same address instead.
     #[serde(default = "default_listen")]
     pub listen: SocketAddr,
     /// Storage SOP classes accepted in addition to the standard ones (e.g. private classes).
@@ -58,6 +61,7 @@ pub struct Config {
     /// Abort associations that have been silent for this many seconds; 0 disables the timeout.
     #[serde(default = "default_idle_timeout")]
     pub idle_timeout_secs: u64,
+    /// Concurrent associations, per port.
     #[serde(default = "default_max_associations")]
     pub max_associations: usize,
 }
@@ -274,59 +278,68 @@ impl Handler for Nodes {
     }
 }
 
-/// The listener, started and stopped by the host. The served AE titles are read from the host's
-/// nodes when it starts.
+/// The listeners, one per port, started and stopped by the host. The served AE titles and their
+/// ports are read from the host's nodes when it starts.
 #[derive(Debug)]
 struct Listener {
     host: Host,
     cfg: Config,
-    running: Mutex<Option<(CancellationToken, JoinHandle<()>)>>,
+    running: Mutex<Option<(CancellationToken, Vec<JoinHandle<()>>)>>,
 }
 
 #[async_trait]
 impl Service for Listener {
     async fn start(&self) -> Result<()> {
-        // Starting again (after the nodes changed) replaces the running listener: it has to
-        // release the port first.
+        // Starting again (after the nodes changed) replaces the running listeners: they have to
+        // release their ports first.
         self.stop().await?;
-        let by_ae: HashMap<String, String> = self
-            .host
-            .nodes()
-            .await?
-            .into_iter()
-            // Remote nodes are proxies; serving them over DIMSE is not supported yet.
-            .filter(|n| !n.remote)
-            .filter_map(|n| Some((n.ae_title?.as_str().to_owned(), n.name)))
-            .collect();
+        let mut by_ae: HashMap<String, String> = HashMap::new();
+        let mut by_port: BTreeMap<u16, Vec<String>> = BTreeMap::new();
+        // Remote nodes are proxies; serving them over DIMSE is not supported yet.
+        for node in self.host.nodes().await?.into_iter().filter(|n| !n.remote) {
+            let Some(ae) = node.ae_title else { continue };
+            let ae = ae.as_str().to_owned();
+            let port = node.dimse_port.unwrap_or(self.cfg.listen.port());
+            by_port.entry(port).or_default().push(ae.clone());
+            by_ae.insert(ae, node.name);
+        }
         if by_ae.is_empty() {
             tracing::warn!("no local node has a DIMSE AE title; the DIMSE listener is not started");
             return Ok(());
         }
-        let scp = Arc::new(Scp::new(
-            self.cfg.scp_options(by_ae.keys().cloned()),
-            Nodes {
-                host: self.host,
-                by_ae: by_ae.clone(),
-            },
-        ));
-        let listen = self.cfg.listen;
-        let listener = TcpListener::bind(listen).await.map_err(|e| {
-            Error::new(
-                ErrorKind::Unavailable,
-                format!("cannot listen on {listen}: {e}"),
-            )
-        })?;
-        let addr = listener.local_addr().unwrap_or(listen);
+        // Bind every port before serving any, so a failure leaves nothing half started.
+        let mut listeners = Vec::new();
+        for (port, ae_titles) in by_port {
+            let listen = SocketAddr::new(self.cfg.listen.ip(), port);
+            let listener = TcpListener::bind(listen).await.map_err(|e| {
+                Error::new(
+                    ErrorKind::Unavailable,
+                    format!("cannot listen on {listen} (AE titles {ae_titles:?}): {e}"),
+                )
+            })?;
+            listeners.push((listener, ae_titles));
+        }
         let token = CancellationToken::new();
-        let shutdown = token.clone();
-        let task = runtime().spawn(async move { scp.serve(listener, shutdown).await });
+        let mut tasks = Vec::new();
+        for (listener, mut ae_titles) in listeners {
+            let addr = listener.local_addr().unwrap_or(self.cfg.listen);
+            // The port's AE titles are accepted; C-MOVE destinations may be any local node.
+            let scp = Arc::new(Scp::new(
+                self.cfg.scp_options(ae_titles.iter().cloned()),
+                Nodes {
+                    host: self.host,
+                    by_ae: by_ae.clone(),
+                },
+            ));
+            let shutdown = token.clone();
+            tasks.push(runtime().spawn(async move { scp.serve(listener, shutdown).await }));
+            ae_titles.sort();
+            tracing::info!(listen = %addr, ?ae_titles, "DIMSE listening");
+        }
         *self
             .running
             .lock()
-            .map_err(|_| Error::internal("listener state poisoned"))? = Some((token, task));
-        let mut ae_titles: Vec<_> = by_ae.keys().collect();
-        ae_titles.sort();
-        tracing::info!(listen = %addr, ?ae_titles, "DIMSE listening");
+            .map_err(|_| Error::internal("listener state poisoned"))? = Some((token, tasks));
         Ok(())
     }
 
@@ -336,9 +349,11 @@ impl Service for Listener {
             .lock()
             .map_err(|_| Error::internal("listener state poisoned"))?
             .take();
-        if let Some((token, task)) = running {
+        if let Some((token, tasks)) = running {
             token.cancel();
-            let _ = task.await;
+            for task in tasks {
+                let _ = task.await;
+            }
             tracing::info!("DIMSE stopped");
         }
         Ok(())

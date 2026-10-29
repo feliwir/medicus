@@ -99,6 +99,9 @@ pub struct NodeInfo {
     /// The AE title under which DIMSE serves the node.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ae_title: Option<AeTitle>,
+    /// The port on which DIMSE serves the node's AE title; `None`: the DIMSE addon's own port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dimse_port: Option<u16>,
     /// The path segment under which `DICOMweb` serves the node (`/nodes/{path}/rs`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dicomweb_path: Option<String>,

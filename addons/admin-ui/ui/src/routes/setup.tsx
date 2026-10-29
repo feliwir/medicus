@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Select } from "@/components/ui/select";
 import { Switch } from "@/components/ui/switch";
-import { api, waitForRestart } from "@/lib/api";
+import { api, nodeRoot, waitForRestart } from "@/lib/api";
 import {
   type DatabaseChoice,
   type SetupChoices,
@@ -70,6 +70,8 @@ export function Setup() {
   const [step, setStep] = useState(0);
   // Once signed in as the administrator: whether PostgreSQL can be chosen.
   const addons = useQuery({ queryKey: ["addons"], queryFn: api.addons, enabled: step >= 2 });
+  const system = useQuery({ queryKey: ["system"], queryFn: api.system, enabled: step >= 2 });
+  const root = system.data?.dicomweb?.node_root;
   const [token, setToken] = useState("");
   const [admin, setAdmin] = useState({ name: "admin", displayName: "", password: "", repeat: "" });
   const [choices, setChoices] = useState<SetupChoices>(defaultChoices);
@@ -308,7 +310,7 @@ export function Setup() {
                       error={errors.dicomwebPath}
                       hint={
                         <>
-                          Served at <code className="font-mono">/nodes/{choices.node.dicomwebPath || "…"}/rs</code>.
+                          Served at <code className="font-mono">{nodeRoot(choices.node.dicomwebPath || "…", root)}</code>.
                         </>
                       }
                     >
@@ -327,7 +329,7 @@ export function Setup() {
                 </p>
               </>
             )}
-            {step === 6 && <Summary choices={choices} />}
+            {step === 6 && <Summary choices={choices} root={root} />}
             {busy && <p className="text-sm text-muted-foreground">{busy}</p>}
             {error && (
               <Alert variant="destructive">
@@ -486,7 +488,7 @@ function DatabaseStep({
   );
 }
 
-function Summary({ choices }: { choices: SetupChoices }) {
+function Summary({ choices, root }: { choices: SetupChoices; root?: string }) {
   const rows: [string, ReactNode][] = [
     ["Server", choices.serverName],
     ["Storage", choices.storagePath || "inside the data directory"],
@@ -504,7 +506,7 @@ function Summary({ choices }: { choices: SetupChoices }) {
           <span className="text-muted-foreground"> · AE {choices.node.aeTitle}</span>
         )}
         {choices.dicomweb.enabled && (
-          <span className="text-muted-foreground"> · /nodes/{choices.node.dicomwebPath}/rs</span>
+          <span className="text-muted-foreground"> · {nodeRoot(choices.node.dicomwebPath, root)}</span>
         )}
       </span>,
     ],

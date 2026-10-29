@@ -174,7 +174,7 @@ An administrator can verify a configured peer through the administrative API. me
 
 #### Association acceptance policy
 
-*Called AE title.* Associations must be addressed to the AE title of a node; any other called AE title is rejected with A-ASSOCIATE-RJ (rejected-permanent, DICOM UL service-user, "called-AE-title-not-recognized"). Associations with an unsupported protocol version or application context name are rejected by the same service-user source.
+*Called AE title.* Associations must be addressed to the AE title of a node, on the node's port; any other called AE title is rejected with A-ASSOCIATE-RJ (rejected-permanent, DICOM UL service-user, "called-AE-title-not-recognized"). Associations with an unsupported protocol version or application context name are rejected by the same service-user source.
 
 *Caller.* The calling AE title and the peer's network address identify the caller: the first principal whose `calling_ae` equals the calling AE title and whose `networks` (CIDR list, if any) contain the peer's address. Callers that match no principal are anonymous. A caller that has no permission at all on the called node is refused: the association is established and immediately aborted (A-ABORT, source DICOM UL service-provider).
 
@@ -349,7 +349,7 @@ By default every transfer syntax whose data sets medicus can read is accepted, f
 
 ### Network interfaces
 
-medicus uses the TCP/IP stack of the operating system. Both IPv4 and IPv6 are supported; the listening addresses are configured. The DIMSE listener uses port 11112 by default, the DICOMweb listener port 8080.
+medicus uses the TCP/IP stack of the operating system. Both IPv4 and IPv6 are supported; the listening addresses are configured. The DIMSE listener uses port 11112 by default, the DICOMweb listener port 8080. A node may name its own DIMSE port; its AE title is then accepted on that port only.
 
 ### Configuration
 
@@ -358,22 +358,25 @@ AE titles, DICOMweb paths, peers and access control are set in the server's conf
 | Setting | Default | Meaning |
 | --- | --- | --- |
 | `[nodes.NAME] dimse.ae_title` | `MEDICUS` (node `MEDICUS`, if no nodes are configured) | The node's AE title; unique across nodes. |
-| `[nodes.NAME] dicomweb.path` | `medicus` | The node's DICOMweb path, served at `/nodes/{path}/rs`. |
+| `[nodes.NAME] dimse.port` | the port of `[addons.dimse] listen` | The port on which the node's AE title is accepted, and the only one. |
+| `[nodes.NAME] dicomweb.path` | `medicus` | The node's DICOMweb path, served at `[addons.dicomweb] node_root`. |
 | `[peers.NAME]` | – | A remote AE: AE title, host and port. |
-| `[addons.dimse] listen` | `0.0.0.0:11112` | DIMSE listening address. |
+| `[addons.dimse] listen` | `0.0.0.0:11112` | DIMSE listening address; nodes with their own port are served on it at the same address. |
 | `[addons.dimse] max_pdu_length` | 65536 | Maximum PDU size received. |
-| `[addons.dimse] max_associations` | 64 | Simultaneous associations. |
+| `[addons.dimse] max_associations` | 64 | Simultaneous associations, per port. |
 | `[addons.dimse] idle_timeout_secs` | 300 | Abort silent associations after this time; 0 disables. |
 | `[addons.dimse] extra_sop_classes` | none | Additional Storage SOP classes. |
 | `[addons.dimse] transfer_syntaxes` | all readable | Accepted transfer syntaxes. |
 | `[addons.dicomweb] listen` | `0.0.0.0:8080` | DICOMweb listening address. |
+| `[addons.dicomweb] node_root` | `/nodes/{node}/rs` | A node's service root; `{node}` is its DICOMweb path. |
+| `[addons.dicomweb] default_root` | `/rs` | The default node's service root. |
 | `[archive] duplicate_policy` | `overwrite` | See Storage SCP. |
 
 ## DICOMweb
 
 ### Service roots
 
-Every node with a DICOMweb path is served at `/nodes/{path}/rs`. One node — the configured `default_node`, or the only node if there is just one — is also served at `/rs`. All resources below are relative to a service root.
+Every node with a DICOMweb path is served at its service root, by default `/nodes/{path}/rs`. One node — the configured `default_node`, or the only node if there is just one — is also served at the default root, by default `/rs`. Both roots are configurable (`node_root`, `default_root`), e.g. `/dicom-web/{node}` and `/dicom-web`. All resources below are relative to a service root.
 
 ### Search (QIDO-RS)
 

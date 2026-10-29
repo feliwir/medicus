@@ -71,12 +71,17 @@ pub struct NodeConfig {
 #[serde(deny_unknown_fields)]
 pub struct NodeDimseConfig {
     pub ae_title: AeTitle,
+    /// The port on which the AE title is reachable, and the only one: default, the port of the
+    /// `dimse` addon's `listen` address. The addon listens on every port its nodes name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NodeDicomwebConfig {
-    /// Path segment: the node is served at `/nodes/{path}/rs`.
+    /// Path segment: the node is served at the `dicomweb` addon's `node_root` with it, by
+    /// default `/nodes/{path}/rs`.
     pub path: String,
 }
 

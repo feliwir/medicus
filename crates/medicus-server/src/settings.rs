@@ -487,6 +487,7 @@ mod tests {
                 peer: None,
                 dimse: Some(NodeDimseConfig {
                     ae_title: "A".parse().unwrap(),
+                    port: None,
                 }),
                 dicomweb: None,
             },

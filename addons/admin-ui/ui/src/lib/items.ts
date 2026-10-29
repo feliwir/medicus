@@ -3,7 +3,8 @@
 export interface NodeItem {
   partition?: string;
   peer?: string;
-  dimse?: { ae_title: string };
+  /** `port`: where the AE title is reachable; default, the DIMSE addon's port. */
+  dimse?: { ae_title: string; port?: number };
   dicomweb?: { path: string };
 }
 

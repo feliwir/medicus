@@ -5,8 +5,9 @@
 //! config = { listen = "0.0.0.0:8080" }
 //! ```
 //!
-//! Every node with a `DICOMweb` path is served at `/nodes/{path}/rs` (ADR-0003); the default
-//! node also at `/rs`. Each request reaches the host with the node and the caller, so the core
+//! Every node with a `DICOMweb` path is served at its service root, by default `/nodes/{path}/rs`
+//! (ADR-0003); the default node also at `/rs`. Both are configurable (`node_root`,
+//! `default_root`), e.g. `/dicom-web/{node}` and `/dicom-web`. Each request reaches the host with the node and the caller, so the core
 //! decides what the caller may do and in which partition, exactly as for DIMSE. Instances are
 //! returned as stored: a request for another transfer syntax is answered with 406. Rendered
 //! resources and thumbnails are decoded with dicom-pixeldata and served as JPEG, PNG or GIF.
@@ -51,7 +52,16 @@ pub struct Config {
     /// request's `Host` (and `X-Forwarded-Proto`) header.
     #[serde(default)]
     pub base_url: Option<String>,
-    /// The node path also served at `/rs`; default: the only node, if there is one.
+    /// The service root of each node; `{node}` stands for the node's `DICOMweb` path. It must
+    /// begin with a fixed segment other than `api` and `health`, which the server uses.
+    #[serde(default = "default_node_root")]
+    #[schemars(extend("pattern" = NODE_ROOT_PATTERN))]
+    pub node_root: String,
+    /// The service root of the default node.
+    #[serde(default = "default_default_root")]
+    #[schemars(extend("pattern" = ROOT_PATTERN))]
+    pub default_root: String,
+    /// The node path also served at `default_root`; default: the only node, if there is one.
     #[serde(default)]
     pub default_node: Option<String>,
     /// Header carrying the user authenticated by a trusted reverse proxy. Only set this if
@@ -66,6 +76,74 @@ pub struct Config {
 
 fn default_listen() -> SocketAddr {
     SocketAddr::from(([0, 0, 0, 0], 8080))
+}
+
+/// Segments of a service root: unreserved URL characters only.
+const SEGMENT: &str = "[A-Za-z0-9._~-]+";
+
+/// A service root: `/`-separated segments, the first not `api` or `health` (the server's).
+const ROOT_PATTERN: &str = r"^/(?!(api|health)(/|$))[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*$";
+
+/// A node's service root: like [`ROOT_PATTERN`], with `{node}` as one segment after the first.
+const NODE_ROOT_PATTERN: &str =
+    r"^/(?!(api|health)(/|$))[A-Za-z0-9._~-]+(/[A-Za-z0-9._~-]+)*/\{node\}(/[A-Za-z0-9._~-]+)*$";
+
+fn default_node_root() -> String {
+    "/nodes/{node}/rs".into()
+}
+
+fn default_default_root() -> String {
+    "/rs".into()
+}
+
+impl Config {
+    /// Checks the service roots, as the schema does, and that they cannot be confused.
+    fn check_roots(&self) -> Result<()> {
+        let segments =
+            |root: &str| -> Vec<String> { root.split('/').skip(1).map(str::to_owned).collect() };
+        let valid = |root: &str, node: bool| {
+            let parts = segments(root);
+            root.starts_with('/')
+                && !matches!(parts.first().map(String::as_str), Some("api" | "health"))
+                && parts.iter().filter(|p| *p == "{node}").count() == usize::from(node)
+                && parts.first().is_some_and(|p| p != "{node}")
+                && parts.iter().all(|p| {
+                    p == "{node}"
+                        || (!p.is_empty()
+                            && p.chars()
+                                .all(|c| c.is_ascii_alphanumeric() || "._~-".contains(c)))
+                })
+        };
+        if !valid(&self.node_root, true) {
+            return Err(Error::invalid_argument(format!(
+                "node_root {:?} must be a path like /nodes/{{node}}/rs: segments of {SEGMENT}, \
+                 {{node}} once and not first, and not under /api or /health",
+                self.node_root
+            )));
+        }
+        if !valid(&self.default_root, false) {
+            return Err(Error::invalid_argument(format!(
+                "default_root {:?} must be a path like /rs: segments of {SEGMENT}, not under /api \
+                 or /health",
+                self.default_root
+            )));
+        }
+        // The default root must not be the root of some node: requests would be ambiguous.
+        let node = segments(&self.node_root);
+        let default = segments(&self.default_root);
+        let overlaps = node.len() == default.len()
+            && node
+                .iter()
+                .zip(&default)
+                .all(|(n, d)| n == "{node}" || n == d);
+        if overlaps {
+            return Err(Error::invalid_argument(format!(
+                "default_root {:?} is the root of a node under node_root {:?}",
+                self.default_root, self.node_root
+            )));
+        }
+        Ok(())
+    }
 }
 
 /// The HTTP listener, started and stopped by the host. The served nodes are read from the host
@@ -120,6 +198,8 @@ impl Service for Listener {
         let state = web::State {
             host: self.host,
             nodes: Arc::new(nodes),
+            node_root: self.cfg.node_root.clone(),
+            default_root: self.cfg.default_root.clone(),
             default_path,
             base_url: self.cfg.base_url.clone(),
             user_header,
@@ -148,7 +228,13 @@ impl Service for Listener {
             .running
             .lock()
             .map_err(|_| Error::internal("listener state poisoned"))? = Some((token, task));
-        tracing::info!(listen = %addr, nodes = ?paths, "DICOMweb listening");
+        tracing::info!(
+            listen = %addr,
+            nodes = ?paths,
+            node_root = %self.cfg.node_root,
+            default_root = %self.cfg.default_root,
+            "DICOMweb listening"
+        );
         Ok(())
     }
 
@@ -169,6 +255,7 @@ impl Service for Listener {
 
 pub fn init(reg: &mut Registrar) -> Result<()> {
     let cfg: Config = reg.config()?;
+    cfg.check_roots()?;
     tracing::info!(listen = %cfg.listen, "DICOMweb addon configured");
     let listener = Listener {
         host: reg.host(),
@@ -189,3 +276,42 @@ pub fn manifest() -> AddonManifest {
 /// Entry points for linking this addon into the server binary.
 pub static ADDON: medicus_addon_sdk::abi::StaticAddon =
     static_addon!(manifest = manifest(), init = init);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn roots(node_root: &str, default_root: &str) -> Result<()> {
+        let mut cfg: Config = serde_json::from_value(serde_json::json!({})).unwrap();
+        cfg.node_root = node_root.into();
+        cfg.default_root = default_root.into();
+        cfg.check_roots()
+    }
+
+    #[test]
+    fn service_roots() {
+        for (node, default) in [
+            ("/nodes/{node}/rs", "/rs"),
+            ("/dicom-web/{node}", "/dicom-web"),
+            ("/pacs/{node}/dicom-web/v1", "/pacs/dicom-web"),
+        ] {
+            roots(node, default).unwrap_or_else(|e| panic!("{node} {default}: {e}"));
+        }
+        for (node, default) in [
+            ("/{node}/rs", "/rs"),
+            ("/nodes/rs", "/rs"),
+            ("/nodes/{node}/{node}", "/rs"),
+            ("/nodes/{node}/", "/rs"),
+            ("nodes/{node}", "/rs"),
+            ("/api/{node}", "/rs"),
+            ("/health/{node}", "/rs"),
+            ("/nodes/{node}", "/"),
+            ("/nodes/{node}", "/api"),
+            ("/nodes/{node} x", "/rs"),
+            // `/dicom-web/rs` would also be the root of a node `rs`.
+            ("/dicom-web/{node}", "/dicom-web/rs"),
+        ] {
+            assert!(roots(node, default).is_err(), "{node} {default}");
+        }
+    }
+}

@@ -883,6 +883,24 @@ pub fn manifest_file(library: &Path, dir: &Path) -> anyhow::Result<(String, Stri
 mod tests {
     use super::*;
 
+    #[cfg(feature = "builtin-dicomweb")]
+    #[test]
+    fn dicomweb_service_roots_are_checked_by_the_schema() {
+        let manifest = dicomweb::manifest();
+        let cfg = Config::default();
+        let check = |roots: serde_json::Value| check_config(&manifest, &cfg, &roots);
+        check(json!({ "node_root": "/dicom-web/{node}", "default_root": "/dicom-web" })).unwrap();
+        for bad in [
+            json!({ "node_root": "/{node}/rs" }),
+            json!({ "node_root": "/nodes/rs" }),
+            json!({ "node_root": "/api/{node}" }),
+            json!({ "default_root": "/health" }),
+            json!({ "default_root": "/" }),
+        ] {
+            assert!(check(bad.clone()).is_err(), "{bad}");
+        }
+    }
+
     fn manifest(name: &str) -> AddonManifest {
         AddonManifest::new(name, "1")
     }

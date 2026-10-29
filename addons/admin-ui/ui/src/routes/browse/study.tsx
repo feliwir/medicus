@@ -6,7 +6,7 @@ import { ErrorAlert } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Select } from "@/components/ui/select";
-import { type DicomJson, dicomweb } from "@/lib/api";
+import { type DicomJson, api, dicomweb } from "@/lib/api";
 import { TAG, formatDate, formatName, formatTag, keyword, number, text } from "@/lib/dicom";
 import { cn } from "@/lib/utils";
 
@@ -219,8 +219,10 @@ function Preview({ root, study, series }: { root: string; study: string; series:
 
 export function Study() {
   const { node = "", study = "" } = useParams({ strict: false });
-  const root = `/nodes/${node}/rs`;
+  const nodes = useQuery({ queryKey: ["nodes"], queryFn: api.nodes });
+  const root = nodes.data?.find((n) => n.dicomweb_path === node)?.dicomweb_url ?? "";
   const info = useQuery({
+    enabled: Boolean(root),
     queryKey: ["study", root, study],
     queryFn: () =>
       dicomweb<DicomJson[]>(
@@ -228,6 +230,7 @@ export function Study() {
       ),
   });
   const series = useQuery({
+    enabled: Boolean(root),
     queryKey: ["series", root, study],
     queryFn: () =>
       dicomweb<DicomJson[]>(

@@ -791,3 +791,101 @@ async fn the_core_proxies_dicomweb() {
     node.request_restart();
     serving.await.unwrap().unwrap();
 }
+
+/// Configured service roots: the addon serves them, the core proxies them, and the URLs in
+/// responses and in `GET /api/v1/nodes` use them.
+#[tokio::test(flavor = "multi_thread")]
+async fn service_roots_are_configurable() {
+    let dir = tempfile::tempdir().unwrap();
+    let (port, core) = (free_port(), free_port());
+    let toml = format!(
+        r#"
+        [http]
+        listen = "127.0.0.1:{core}"
+        [nodes.A]
+        partition = "default"
+        dicomweb = {{ path = "a" }}
+        "#
+    );
+    let roots = json!({ "node_root": "/dicom-web/{node}", "default_root": "/dicom-web" });
+    let node = node(dir.path(), port, &toml, roots).await;
+    node.accounts
+        .create_user("root", None, vec![crate::access::ADMIN_ROLE.into()], None)
+        .await
+        .unwrap();
+    let token = node
+        .accounts
+        .create_token("root", None, None)
+        .await
+        .unwrap()
+        .secret;
+    node.stop_services().await;
+    let node = std::sync::Arc::new(node);
+    let serving = tokio::spawn(node.clone().serve(std::future::pending()));
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{core}");
+    for _ in 0..50 {
+        if client
+            .get(format!("{base}/health/live"))
+            .send()
+            .await
+            .is_ok()
+        {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    let get = |url: String| client.get(url).bearer_auth(&token).send();
+
+    let file = InstanceBuilder::new("6.1", "6.1.1", "6.1.1.1").build();
+    let (content_type, body) = stow_body(&[file]);
+    let stored = client
+        .post(format!("http://127.0.0.1:{port}/dicom-web/a/studies"))
+        .bearer_auth(&token)
+        .header("content-type", content_type)
+        .body(body)
+        .send()
+        .await
+        .unwrap();
+    assert!(stored.status().is_success(), "{}", stored.status());
+    for direct in [true, false] {
+        let host = if direct {
+            format!("http://127.0.0.1:{port}")
+        } else {
+            base.clone()
+        };
+        for root in ["/dicom-web/a", "/dicom-web"] {
+            let found: Value = get(format!("{host}{root}/studies"))
+                .await
+                .unwrap()
+                .json()
+                .await
+                .unwrap();
+            let url = found[0][tags::RETRIEVE_URL.json_key()]["Value"][0]
+                .as_str()
+                .unwrap();
+            assert_eq!(url, format!("{host}{root}/studies/6.1"));
+        }
+        // The default roots are not served any more.
+        let old = get(format!("{host}/nodes/a/rs/studies")).await.unwrap();
+        assert_eq!(old.status(), 404, "direct: {direct}");
+    }
+
+    let nodes: Value = get(format!("{base}/api/v1/nodes"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(nodes[0]["dicomweb_url"], "/dicom-web/a");
+    let system: Value = get(format!("{base}/api/v1/system"))
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(system["dicomweb"]["node_root"], "/dicom-web/{node}");
+
+    node.request_restart();
+    serving.await.unwrap().unwrap();
+}

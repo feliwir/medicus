@@ -103,8 +103,8 @@ export function Dashboard() {
                   <li key={n.name} className="flex flex-wrap items-center gap-1.5">
                     <span className="font-medium">{n.name}</span>
                     {n.ae_title && <Badge variant="outline" className="font-mono">AE {n.ae_title}</Badge>}
-                    {n.dicomweb_path && (
-                      <Badge variant="outline" className="font-mono">/nodes/{n.dicomweb_path}/rs</Badge>
+                    {n.dicomweb_url && (
+                      <Badge variant="outline" className="font-mono">{n.dicomweb_url}</Badge>
                     )}
                     {n.remote && <Badge>remote</Badge>}
                   </li>

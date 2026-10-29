@@ -157,7 +157,9 @@ own AE title or credentials.
   inherit through their foreign keys); uniqueness per partition; partition on events and jobs.
   Nothing is released yet, so migrations 0001/0002 are rewritten instead of migrated.
 - The DIMSE addon serves several AE titles on one listener, and C-MOVE sub-operations use the
-  source node's AE title.
+  source node's AE title. *Later: a node may name its own DIMSE port; the addon then listens on
+  every port its nodes name, and accepts each AE title only on its port. AE titles stay unique.*
+- *Later: the DICOMweb service roots are configurable (`node_root`, `default_root`).*
 - The DICOMweb addon (M5) is node-scoped from the start (`/nodes/{node}/rs/...`, plus an optional
   default node at `/rs/...`).
 - Until `HttpAuth` exists, the admin API is open only on loopback (or behind a static token) and

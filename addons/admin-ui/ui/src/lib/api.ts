@@ -61,15 +61,31 @@ export interface SystemInfo {
   restart_required: string[];
   /** Set when the archive index is unavailable: only the admin UI and API work (ADR-0005). */
   degraded?: { index: string; error: string } | null;
+  /** Null without the DICOMweb addon. */
+  dicomweb?: DicomwebRoots | null;
   addons: AddonStatus[];
 }
 
 export interface NodeInfo {
   name: string;
   ae_title?: string;
+  dimse_port?: number;
   dicomweb_path?: string;
+  /** The node's DICOMweb service root on this server, e.g. `/nodes/radiology/rs`. */
+  dicomweb_url?: string;
   remote: boolean;
 }
+
+/** The DICOMweb addon's service roots; `{node}` stands for a node's path. */
+export interface DicomwebRoots {
+  node_root: string;
+  default_root: string;
+}
+
+export const DEFAULT_NODE_ROOT = "/nodes/{node}/rs";
+
+/** A node's DICOMweb service root, by the addon's `node_root`. */
+export const nodeRoot = (path: string, template: string = DEFAULT_NODE_ROOT) => template.replace("{node}", path);
 
 export interface Job {
   id: string;

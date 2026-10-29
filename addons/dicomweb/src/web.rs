@@ -1,5 +1,5 @@
-//! Routing: every resource is served per node, at `/nodes/{path}/rs/...`, and for the default node
-//! also at `/rs/...`.
+//! Routing: every resource is served per node, below the node's service root (`node_root`, by
+//! default `/nodes/{path}/rs/...`), and for the default node also below `default_root` (`/rs/...`).
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -25,7 +25,11 @@ pub(crate) struct State {
     pub(crate) host: Host,
     /// `DICOMweb` path → node name.
     pub(crate) nodes: Arc<HashMap<String, String>>,
-    /// The path of the node also served at `/rs`.
+    /// A node's service root, with `{node}` for its path.
+    pub(crate) node_root: String,
+    /// The default node's service root.
+    pub(crate) default_root: String,
+    /// The path of the node also served at `default_root`.
     pub(crate) default_path: Option<String>,
     /// Absolute base for Retrieve URLs (e.g. `https://pacs.example.org`); else from `Host`.
     pub(crate) base_url: Option<String>,
@@ -61,14 +65,14 @@ impl FromRequestParts<State> for Request {
                 .map_err(|e| WebError::bad_request(e.to_string()))?;
         let (path, prefix) = match params.remove("node") {
             Some(path) => {
-                let prefix = format!("/nodes/{path}/rs");
+                let prefix = state.node_root.replace("{node}", &path);
                 (path, prefix)
             }
             None => (
                 state.default_path.clone().ok_or_else(|| {
-                    WebError::bad_request("no default node; use /nodes/{node}/rs")
+                    WebError::bad_request(format!("no default node; use {}", state.node_root))
                 })?,
-                "/rs".to_owned(),
+                state.default_root.clone(),
             ),
         };
         let node = state
@@ -237,8 +241,8 @@ fn routes() -> Router<State> {
 
 pub(crate) fn router(state: State, cors_origins: &[String]) -> medicus_core::Result<Router> {
     let router = Router::new()
-        .nest("/nodes/{node}/rs", routes())
-        .nest("/rs", routes())
+        .nest(&state.node_root, routes())
+        .nest(&state.default_root, routes())
         .route("/health", post(|| async { "ok" }).get(|| async { "ok" }))
         .layer(axum::extract::DefaultBodyLimit::disable())
         .with_state(state);
